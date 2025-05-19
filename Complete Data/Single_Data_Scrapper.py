@@ -2,29 +2,21 @@ import os
 from playwright.sync_api import sync_playwright
 import pandas as pd
 import json
-from datetime import datetime
 
-
+# Month codes for symbol + path mapping
 MONTH_CODES = ['', 'F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
+# Directory part for URL path (1-9, A, B, C)
+MONTH_DIR  = {i: str(i) for i in range(1, 10)}
+MONTH_DIR.update({10: "A", 11: "B", 12: "C"})
 
 def fetch_contract_via_barchart_json(underlying: str, year: int, month: int) -> pd.DataFrame:
-    """
-    Fetch OHLCV history for a given futures contract from Barchart JSON.
-
-    underlying: e.g. "CC"
-    year:       four-digit year, e.g. 2025
-    month:      numeric month 1..12
-
-    Returns a DataFrame with Date, open, high, low, close, volume.
-    """
-    # Build target symbol, e.g. CC + month code + two-digit year
-    month_code = MONTH_CODES[month]
+    month_code   = MONTH_CODES[month]
     target_symbol = f"{underlying}{month_code}{str(year)[2:]}"
     data_payload = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        page    = browser.new_page()
 
         def on_response(resp):
             nonlocal data_payload
@@ -38,15 +30,9 @@ def fetch_contract_via_barchart_json(underlying: str, year: int, month: int) -> 
             except Exception:
                 pass
 
-        MONTH_DIR = {i: str(i) for i in range(1, 10)}
-        MONTH_DIR.update({10: "A", 11: "B", 12: "C"})
-
-        # …then, inside your loop or function:
-        month_new = MONTH_DIR[month]
-
         page.on("response", on_response)
         page.goto(
-            f"https://futures.tradingcharts.com/historical/{underlying}/{year}/{month_new}/linewchart.html",
+            f"https://futures.tradingcharts.com/historical/{underlying}/{year}/{MONTH_DIR[month]}/linewchart.html",
             wait_until="networkidle"
         )
         browser.close()
@@ -58,41 +44,48 @@ def fetch_contract_via_barchart_json(underlying: str, year: int, month: int) -> 
     df["Date"] = pd.to_datetime(df["tradingDay"])
     return df[["Date", "open", "high", "low", "close", "volume"]]
 
-
 def main(
-        underlying: str = "CC",
-        start_year: int = 1999,
-        end_year: int = 2026,
-        months_to_check: list[int] | None = None
+    underlying: str,
+    output_folder: str,
+    year_month_map: dict[int, list[int]]
 ):
     """
-    Fetch and save historical CSVs for `underlying` from start_year to end_year.
-
-    months_to_check: optional list of month numbers (1–12).
-                     If None, all months are fetched.
+    underlying:      e.g. "CC"
+    output_folder:   path where CSVs will be saved
+    year_month_map:  {1999: [3,5,12], 2000: [1,2], ...}
     """
-    # If no filter is provided, check all 1–12
-    if months_to_check is None:
-        months_to_check = list(range(1, 13))
+    os.makedirs(output_folder, exist_ok=True)
 
-    base_dir = f"{underlying}_Historic_Data"
-    os.makedirs(base_dir, exist_ok=True)
-
-    for year in range(start_year, end_year + 1):
-        for month in months_to_check:
+    for year, months in sorted(year_month_map.items()):
+        for month in sorted(months):
             try:
                 df = fetch_contract_via_barchart_json(underlying, year, month)
                 if df.empty:
                     print(f"No data for {underlying} {year}-{month:02d}")
                     continue
 
-                file_name = f"{underlying}_{year:04d}-{month:02d}.csv"
-                file_path = os.path.join(base_dir, file_name)
-                df.to_csv(file_path, index=False)
-                print(f"Saved {file_path}")
+                fname = f"{underlying}_{year:04d}-{month:02d}.csv"
+                path  = os.path.join(output_folder, fname)
+                df.to_csv(path, index=False)
+                print(f"Saved {path}")
 
             except Exception as e:
                 print(f"Error fetching {underlying} {year}-{month:02d}: {e}")
 
 if __name__ == "__main__":
-    main(months_to_check=[12])
+    # === configure here ===
+    UNDERLYING     = "CC"
+    BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
+    OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
+    YEAR_MONTH_MAP = {
+        2008: [7],
+        2010: [12],
+        2016: [12],
+        2017: [5],
+        2019: [9],
+        2020: [9],
+        # add as many years→month-lists as you like
+    }
+    # ========================
+
+    main(UNDERLYING, OUTPUT_FOLDER, YEAR_MONTH_MAP)
