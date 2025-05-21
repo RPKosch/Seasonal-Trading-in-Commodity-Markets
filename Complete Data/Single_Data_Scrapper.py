@@ -74,18 +74,15 @@ def main(
 
 if __name__ == "__main__":
     # === configure here ===
-    UNDERLYING     = "CC"
+    UNDERLYING     = "PA"
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-        2008: [7],
-        2010: [12],
-        2016: [12],
-        2017: [5],
-        2019: [9],
-        2020: [9],
-        # add as many years→month-lists as you like
+    2025: [8, 10, 11],
     }
     # ========================
 
     main(UNDERLYING, OUTPUT_FOLDER, YEAR_MONTH_MAP)
+
+    #https://futures.tradingcharts.com/historical/PL/1999/4/linechart.html
+    #https://futures.tradingcharts.com/historical/CP/1999/9/linechart.html

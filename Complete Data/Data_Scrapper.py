@@ -26,6 +26,9 @@ def fetch_contract_via_barchart_json(underlying: str, year: int, month: int) -> 
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
+        page.set_default_navigation_timeout(45000)
+        page.set_default_timeout(45000)
+
         def on_response(resp):
             nonlocal data_payload
             if "getHistory.json" not in resp.url:
@@ -60,9 +63,9 @@ def fetch_contract_via_barchart_json(underlying: str, year: int, month: int) -> 
 
 
 def main(
-        underlying: str = "CC",
+        underlying: str = "PA",
         start_year: int = 1999,
-        end_year: int = 2026,
+        end_year: int = 2025,
         months_to_check: list[int] | None = None
 ):
     """
@@ -95,4 +98,5 @@ def main(
                 print(f"Error fetching {underlying} {year}-{month:02d}: {e}")
 
 if __name__ == "__main__":
-    main(months_to_check=[12])
+    #main(months_to_check=[1, 4, 7, 10])
+    main()
