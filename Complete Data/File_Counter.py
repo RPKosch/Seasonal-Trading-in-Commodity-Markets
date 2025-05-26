@@ -5,7 +5,7 @@ import re
 def count_files_by_year_in_name(
         base_dir: str,
         folder_name: str,
-        start_year: int = 2010,
+        start_year: int = 1999,
         end_year: int = 2025,
         fix_count: int = 4
 ):
@@ -50,6 +50,7 @@ def count_files_by_year_in_name(
     # --- 2) print missing months ---
     print("\nMissing months by year:")
     all_months = set(range(1, 13))
+    #all_months =set([3,5,7,10, 12])
     for year, months in wrong_years.items():
         missing = sorted(all_months - set(months))
         if(missing != []):
@@ -58,6 +59,6 @@ def count_files_by_year_in_name(
 
 if __name__ == "__main__":
     BASE_DIR = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
-    FOLDER = "PA_Historic_Data"
+    FOLDER = "CC_Historic_Data"
 
     count_files_by_year_in_name(BASE_DIR, FOLDER)
