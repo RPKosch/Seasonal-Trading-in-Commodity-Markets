@@ -60,6 +60,6 @@ def count_files_by_year_in_name(
 
 if __name__ == "__main__":
     BASE_DIR = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
-    FOLDER = "CF_Historic_Data"
+    FOLDER = "CO_Historic_Data"
 
     count_files_by_year_in_name(BASE_DIR, FOLDER)
