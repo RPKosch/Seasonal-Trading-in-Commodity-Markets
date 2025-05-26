@@ -3,12 +3,13 @@ import re
 
 
 def count_files_by_year_in_name(
-        base_dir: str,
-        folder_name: str,
-        start_year: int = 1999,
-        end_year: int = 2025,
-        fix_count: int = 4
-):
+    base_dir: str,
+    folder_name: str,
+    start_year: int = 1999,
+    end_year: int = 2025,
+    fix_count: int = 4,
+) -> None:
+
     """
     Counts files in `base_dir/folder_name` whose names contain
     each year from start_year to end_year anywhere in the filename.
@@ -59,6 +60,6 @@ def count_files_by_year_in_name(
 
 if __name__ == "__main__":
     BASE_DIR = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
-    FOLDER = "CC_Historic_Data"
+    FOLDER = "CF_Historic_Data"
 
     count_files_by_year_in_name(BASE_DIR, FOLDER)

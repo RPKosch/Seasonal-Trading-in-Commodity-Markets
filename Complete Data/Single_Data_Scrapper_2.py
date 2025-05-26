@@ -79,11 +79,11 @@ def main(
 
 if __name__ == "__main__":
     # === configure here ===
-    UNDERLYING     = "SV"
+    UNDERLYING     = "CF"
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-        2015: [3],
+        2020: [9],
     }
     # ======================
 

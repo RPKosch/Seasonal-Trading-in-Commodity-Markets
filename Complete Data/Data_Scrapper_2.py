@@ -42,8 +42,8 @@ async def fetch_history_via_playwright(url: str) -> pd.DataFrame:
     return df
 
 async def main(
-    underlying: str = "SV",
-    start_year: int = 2000,
+    underlying: str = "CF",
+    start_year: int = 1999,
     end_year: int   = 2025,
     months_to_check: list[int] | None = None
 ):
