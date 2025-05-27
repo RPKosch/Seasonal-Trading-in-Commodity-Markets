@@ -7,7 +7,7 @@ def count_files_by_year_in_name(
     folder_name: str,
     start_year: int = 1999,
     end_year: int = 2025,
-    fix_count: int = 4,
+    fix_count: int = 5,
 ) -> None:
 
     """
@@ -60,6 +60,6 @@ def count_files_by_year_in_name(
 
 if __name__ == "__main__":
     BASE_DIR = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
-    FOLDER = "CO_Historic_Data"
+    FOLDER = "CF_Historic_Data"
 
     count_files_by_year_in_name(BASE_DIR, FOLDER)

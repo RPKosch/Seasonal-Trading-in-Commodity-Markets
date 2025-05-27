@@ -1,50 +1,76 @@
 import os
 import asyncio
 import pandas as pd
-from playwright.async_api import async_playwright
+import json
+from playwright.sync_api import sync_playwright
+from collections import Counter
+from collections import defaultdict
 
 # map 1–12 → URL segment for the historical path
 MONTH_DIR = {i: str(i) for i in range(1, 10)}
 MONTH_DIR.update({10: "A", 11: "B", 12: "C"})
 
-async def fetch_history_via_playwright(url: str) -> pd.DataFrame:
+def fetch_history_sync(url: str) -> pd.DataFrame:
     """
-    Navigates to `url`, intercepts the POST to getHistory.json,
-    and returns a DataFrame of the results (with a parsed timestamp).
+    Navigate to a linechart page, intercept all getHistory.json POSTs,
+    then return the series for which an exact duplicate exists.
+    If none are duplicated, fall back to the longest series.
     """
-    all_data = []
+    all_series = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page    = await browser.new_page()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page    = browser.new_page()
 
-        # Capture the historical JSON response
-        async def on_response(response):
-            if "getHistory.json" in response.url and response.request.method == "POST":
-                payload = await response.json()
-                results = payload.get("results", [])
-                if results:
-                    all_data.extend(results)
+        def on_response(resp):
+            if "getHistory.json" in resp.url and resp.request.method == "POST":
+                try:
+                    payload = resp.json()
+                    results = payload.get("results", [])
+                    if results:
+                        all_series.append(results)
+                except:
+                    pass
 
         page.on("response", on_response)
+        page.goto(url, wait_until="networkidle")
+        browser.close()
 
-        await page.goto(url)
-        # wait until no network activity to be sure the POST fired
-        await page.wait_for_load_state("networkidle")
-        await browser.close()
-
-    if not all_data:
+    if not all_series:
         raise RuntimeError(f"No data intercepted for {url}")
 
-    df = pd.DataFrame(all_data)
-    # Let pandas infer format (handles ISO strings and/or ms)
+    # --- fingerprint each series and count ---
+    fps = [json.dumps(series, sort_keys=True) for series in all_series]
+    counts = Counter(fps)
+
+    # find any fingerprint that occurs >1
+    dup_fps = [fp for fp, cnt in counts.items() if cnt > 1]
+    if dup_fps:
+        # use the first duplicate fingerprint
+        chosen_fp = dup_fps[0]
+        # find all indices in all_series that match
+        dup_indices = [i for i, fp in enumerate(fps, start=1) if fp == chosen_fp]
+        #   print(f"Found duplicate series at indices {dup_indices}, using the first one.")
+        main_series = all_series[dup_indices[0] - 1]  # -1 because we started at 1
+    else:
+        #   print("No exact duplicates found; falling back to the longest series.")
+        return pd.DataFrame()
+
+
+    # build the DataFrame to return
+    df = pd.DataFrame(main_series)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
-async def main(
-    underlying: str = "CO",
+
+import os
+import pandas as pd
+from collections import defaultdict
+
+def main(
+    underlying: str = "CF",
     start_year: int = 1999,
-    end_year: int   = 2025,
+    end_year: int   = 2000,
     months_to_check: list[int] | None = None
 ):
     if months_to_check is None:
@@ -52,6 +78,9 @@ async def main(
 
     out_dir = f"{underlying}_Historic_Data"
     os.makedirs(out_dir, exist_ok=True)
+
+    # This will collect all the missing months per year
+    missing = defaultdict(list)
 
     for year in range(start_year, end_year + 1):
         for month in months_to_check:
@@ -62,7 +91,8 @@ async def main(
             )
             try:
                 print(f"Fetching {underlying} {year}-{month:02d} …")
-                full = await fetch_history_via_playwright(url)
+                full = fetch_history_sync(url)
+
                 if full.empty:
                     print(f"  ⚠️ No data for {underlying} {year}-{month:02d}")
                     continue
@@ -78,9 +108,24 @@ async def main(
 
             except Exception as e:
                 print(f"  ❌ Error for {underlying} {year}-{month:02d}: {e}")
+                missing[year].append(month)
 
+    # After all loops, print the summary of missing months
+    if missing:
+        print("\nMissing months by year:")
+        for yr in sorted(missing):
+            # sort months and remove duplicates if any
+            months = sorted(set(missing[yr]))
+            months_str = ", ".join(str(m) for m in months)
+            print(f"    {yr}: [{months_str}]")
+    else:
+        print("\nAll requested months fetched successfully!")
 
 if __name__ == "__main__":
-    # to run: pip install playwright pandas
-    # then: playwright install
-    asyncio.run(main())
+    main(
+        underlying="CF",
+        start_year=2014,
+        end_year=2025,
+        months_to_check=None,
+    )
+

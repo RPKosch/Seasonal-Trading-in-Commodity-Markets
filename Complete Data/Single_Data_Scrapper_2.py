@@ -1,6 +1,8 @@
 import os
 import pandas as pd
+import json
 from playwright.sync_api import sync_playwright
+from collections import Counter
 
 # Directory segment in the URL (1–9 stay numeric, 10→A, 11→B, 12→C)
 MONTH_DIR   = {i: str(i) for i in range(1, 10)}
@@ -8,10 +10,11 @@ MONTH_DIR.update({10: "A", 11: "B", 12: "C"})
 
 def fetch_history_sync(url: str) -> pd.DataFrame:
     """
-    Navigate to a linechart page, intercept the getHistory.json POST,
-    and return a DataFrame of the results (with parsed timestamp).
+    Navigate to a linechart page, intercept all getHistory.json POSTs,
+    then return the series for which an exact duplicate exists.
+    If none are duplicated, fall back to the longest series.
     """
-    all_data = []
+    all_series = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -23,7 +26,7 @@ def fetch_history_sync(url: str) -> pd.DataFrame:
                     payload = resp.json()
                     results = payload.get("results", [])
                     if results:
-                        all_data.extend(results)
+                        all_series.append(results)
                 except:
                     pass
 
@@ -31,13 +34,32 @@ def fetch_history_sync(url: str) -> pd.DataFrame:
         page.goto(url, wait_until="networkidle")
         browser.close()
 
-    if not all_data:
+    if not all_series:
         raise RuntimeError(f"No data intercepted for {url}")
 
-    df = pd.DataFrame(all_data)
-    # parse ISO‐8601 timestamps or epoch ms
+    # --- fingerprint each series and count ---
+    fps = [json.dumps(series, sort_keys=True) for series in all_series]
+    counts = Counter(fps)
+
+    # find any fingerprint that occurs >1
+    dup_fps = [fp for fp, cnt in counts.items() if cnt > 1]
+    if dup_fps:
+        # use the first duplicate fingerprint
+        chosen_fp = dup_fps[0]
+        # find all indices in all_series that match
+        dup_indices = [i for i, fp in enumerate(fps, start=1) if fp == chosen_fp]
+        #   print(f"Found duplicate series at indices {dup_indices}, using the first one.")
+        main_series = all_series[dup_indices[0] - 1]  # -1 because we started at 1
+    else:
+        #   print("No exact duplicates found; falling back to the longest series.")
+        return pd.DataFrame()
+
+
+    # build the DataFrame to return
+    df = pd.DataFrame(main_series)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
+
 
 def main(
     underlying: str,
@@ -79,13 +101,13 @@ def main(
 
 if __name__ == "__main__":
     # === configure here ===
-    UNDERLYING     = "CO"
+    UNDERLYING     = "CF"
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-    2000: [5],
-    2020: [8],
-    2024: [12],
+    2023: [8],
+
+
     }
     # ======================
 
