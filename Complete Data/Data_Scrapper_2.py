@@ -117,14 +117,14 @@ def main(
             # sort months and remove duplicates if any
             months = sorted(set(missing[yr]))
             months_str = ", ".join(str(m) for m in months)
-            print(f"    {yr}: [{months_str}]")
+            print(f"    {yr}: [{months_str}],")
     else:
         print("\nAll requested months fetched successfully!")
 
 if __name__ == "__main__":
     main(
-        underlying="CF",
-        start_year=2014,
+        underlying="SU",
+        start_year=1999,
         end_year=2025,
         months_to_check=None,
     )
