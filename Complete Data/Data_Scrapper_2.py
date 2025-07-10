@@ -63,10 +63,6 @@ def fetch_history_sync(url: str) -> pd.DataFrame:
     return df
 
 
-import os
-import pandas as pd
-from collections import defaultdict
-
 def main(
     underlying: str = "CF",
     start_year: int = 1999,
@@ -123,7 +119,7 @@ def main(
 
 if __name__ == "__main__":
     main(
-        underlying="SU",
+        underlying="SV",
         start_year=1999,
         end_year=2025,
         months_to_check=None,

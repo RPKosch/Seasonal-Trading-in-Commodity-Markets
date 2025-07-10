@@ -3,6 +3,7 @@ import pandas as pd
 import json
 from playwright.sync_api import sync_playwright
 from collections import Counter
+from collections import defaultdict
 
 # Directory segment in the URL (1–9 stay numeric, 10→A, 11→B, 12→C)
 MONTH_DIR   = {i: str(i) for i in range(1, 10)}
@@ -73,6 +74,8 @@ def main(
     """
     os.makedirs(output_folder, exist_ok=True)
 
+    missing = defaultdict(list)
+
     for year, months in sorted(year_month_map.items()):
         for month in sorted(months):
             mdir = MONTH_DIR[month]
@@ -98,17 +101,26 @@ def main(
 
             except Exception as e:
                 print(f"   ❌ Error for {underlying} {year}-{month:02d}: {e}")
+                missing[year].append(month)
+
+    # After all loops, print the summary of missing months
+    if missing:
+        print("\nMissing months by year:")
+        for yr in sorted(missing):
+            # sort months and remove duplicates if any
+            months = sorted(set(missing[yr]))
+            months_str = ", ".join(str(m) for m in months)
+            print(f"    {yr}: [{months_str}],")
+    else:
+        print("\nAll requested months fetched successfully!")
 
 if __name__ == "__main__":
     # === configure here ===
-    UNDERLYING     = "SU"
+    UNDERLYING     = "SV"
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-    1999: [10],
-    2013: [9],
-
-
+        2022: [8],
     }
     # ======================
 
