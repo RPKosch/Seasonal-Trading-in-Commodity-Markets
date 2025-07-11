@@ -39,36 +39,48 @@ def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int
       end_date, end_value
     or None if cannot compute.
     """
-    contract_file = find_contract_file(data_root, ticker, year, month)
-    if not contract_file:
-        return None
+    # try both rollover possibilities
+    for offset in (1, 2, 3, 4):
+        # build candidate contract filename
+        cdt = date(year, month, 1) + relativedelta(months=offset)
+        fname = f"{ticker}_{cdt.year:04d}-{cdt.month:02d}.csv"
+        contract_file = data_root / fname
+        if not contract_file.exists():
+            continue
 
-    df = pd.read_csv(contract_file, parse_dates=["Date"])
-    start_dt = pd.Timestamp(year, month, 1)
-    end_dt   = start_dt + relativedelta(months=1) - pd.Timedelta(days=1)
-    mdf = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
-    if mdf.empty:
-        return None
+        # load & filter
+        df = pd.read_csv(contract_file, parse_dates=["Date"])
+        start_dt = pd.Timestamp(year, month, 1)
+        end_dt   = start_dt + relativedelta(months=1) - pd.Timedelta(days=1)
+        mdf = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
+        if mdf.empty:
+            # this contract doesn’t actually cover our month—try next rollover
+            continue
 
-    mdf = mdf.sort_values("Date")
-    first_row = mdf.iloc[0]
-    last_row  = mdf.iloc[-1]
+        # we found a valid contract with data
+        mdf = mdf.sort_values("Date")
+        first_row = mdf.iloc[0]
+        last_row  = mdf.iloc[-1]
 
-    first_open = first_row["open"]
-    last_close = last_row["close"]
-    ret = last_close / first_open - 1
+        first_open = first_row["open"]
+        last_close = last_row["close"]
+        ret = last_close / first_open - 1
 
-    return {
-        "ticker":      ticker,
-        "year":        year,
-        "month":       month,
-        "return":      ret,
-        "contract":    contract_file.stem,
-        "start_date":  first_row["Date"].strftime("%Y-%m-%d"),
-        "start_value": first_open,
-        "end_date":    last_row["Date"].strftime("%Y-%m-%d"),
-        "end_value":   last_close,
-    }
+        return {
+            "ticker":      ticker,
+            "year":        year,
+            "month":       month,
+            "return":      ret,
+            "contract":    contract_file.stem,
+            "start_date":  first_row["Date"].strftime("%Y-%m-%d"),
+            "start_value": first_open,
+            "end_date":    last_row["Date"].strftime("%Y-%m-%d"),
+            "end_value":   last_close,
+        }
+
+    # no offset worked
+    return None
+
 
 def main():
     project_root = Path(__file__).resolve().parent.parent
