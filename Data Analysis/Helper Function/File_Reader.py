@@ -9,7 +9,7 @@ def choose(prompt, options):
 
 def main():
     # this file: …/Data Analysis/File_Reader.py
-    here: Path = Path(__file__).resolve().parent
+    here: Path = Path().resolve().parent
 
     # project root is one level up
     project_root: Path = here.parent

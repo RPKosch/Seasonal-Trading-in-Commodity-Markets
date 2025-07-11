@@ -6,7 +6,7 @@ from dateutil.relativedelta import relativedelta
 from datetime import date
 
 # === CONFIGURATION ===
-TICKERS     = ["CC", "CF", "CO", "CP", "CT", "CW", "GD", "HE", "HO", "LE", "NG", "PA", "PL", "RB", "SB", "SU", "SV", "ZC"]   # add as many as you like
+TICKERS     = ["CC", "CF", "CO", "CP", "CT", "CW", "GD", "HE", "HO", "LE", "NG", "PA", "PL", "RB", "SB", "SU", "SV", "ZC"]
 START_YEAR, START_MONTH = 1999, 1
 END_YEAR,   END_MONTH   = 2025, 4
 
@@ -83,7 +83,7 @@ def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int
 
 
 def main():
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path().resolve().parent.parent
     output_dir   = project_root / "Complete Data" / "All_Monthly_Return_Data"
     output_dir.mkdir(parents=True, exist_ok=True)
 
