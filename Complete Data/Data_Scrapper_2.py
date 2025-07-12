@@ -119,9 +119,10 @@ def main(
 
 if __name__ == "__main__":
     main(
-        underlying="SV",
+        underlying="ZW",
         start_year=1999,
         end_year=2025,
         months_to_check=None,
+        #months_to_check=[1, 3, 5],
     )
 
