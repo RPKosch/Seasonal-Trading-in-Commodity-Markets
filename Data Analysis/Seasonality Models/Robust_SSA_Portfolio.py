@@ -15,24 +15,27 @@ START_YEAR, START_MONTH             = 2001, 1
 INITIAL_END_YEAR, INITIAL_END_MONTH = 2010, 12
 FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 
-START_VALUE = 1000.0
-ENTRY_COST  = 0.0025
-EXIT_COST   = 0.0025
+START_VALUE      = 1000.0
+ENTRY_COST       = 0.0025
+EXIT_COST        = 0.0025
+LOOKBACK_YEARS   = None      # or None for full history
+NUM_SELECT       = 1
+STRICT_SELECTION = True
+MODE             = "Long"  # "Long", "Short", or "LongShort"
 
-# how many years of history to use for RLSSA?
-# set to None to use full history, or an integer like 5 for last 5 years
-LOOKBACK_YEARS = 10
+PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
+PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
 
-# Plot window
-PLOT_START_YEAR, PLOT_START_MONTH   = 2011, 1
-PLOT_END_YEAR,   PLOT_END_MONTH     = 2024, 12
+# RLSSA parameters
+RLSSA_WINDOW = 12
+RLSSA_RANK   = 2
 
 # ----------------------------
 # Convert to datetime endpoints
 # ----------------------------
 start_date  = datetime(START_YEAR, START_MONTH, 1)
 initial_end = datetime(INITIAL_END_YEAR, INITIAL_END_MONTH, 1) + pd.offsets.MonthEnd(0)
-final_end   = datetime(FINAL_END_YEAR, FINAL_END_MONTH,   1) + pd.offsets.MonthEnd(0)
+final_end   = datetime(FINAL_END_YEAR, FINAL_END_MONTH, 1) + pd.offsets.MonthEnd(0)
 plot_start  = datetime(PLOT_START_YEAR, PLOT_START_MONTH, 1)
 plot_end    = datetime(PLOT_END_YEAR,   PLOT_END_MONTH,   1) + pd.offsets.MonthEnd(0)
 
@@ -84,18 +87,14 @@ def find_contract(ticker: str, year: int, month: int):
     candidates = []
     for p in root.iterdir():
         m = pattern.match(p.name)
-        if not m:
-            continue
+        if not m: continue
         fy, fm = int(m.group(1)), int(m.group(2))
         diff = (fy - year)*12 + (fm - month)
-        if diff < 2:
-            continue
+        if diff < 2: continue
         df = pd.read_csv(p, parse_dates=["Date"])
-        if df["Date"].max() < mend + timedelta(days=15):
-            continue
-        mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
-        if mdf.empty:
-            continue
+        if df.Date.max() < mend + timedelta(days=15): continue
+        mdf = df[(df.Date>=m0)&(df.Date<=mend)]
+        if mdf.empty: continue
         candidates.append((diff, p.name, mdf.sort_values("Date")))
     if not candidates:
         return None, None
@@ -103,15 +102,18 @@ def find_contract(ticker: str, year: int, month: int):
     return fname, mdf
 
 # ----------------------------
-# Load monthly returns
+# Load monthly returns into dict
 # ----------------------------
 monthly_dir = Path().resolve().parent.parent / "Complete Data" / "All_Monthly_Return_Data"
 files       = list(monthly_dir.glob("*_Monthly_Revenues.csv"))
-print(f"Found {len(files)} monthly‑revenue files.")
+returns     = {}
+for f in files:
+    t = f.stem.replace("_Monthly_Revenues","")
+    df = pd.read_csv(f)
+    df['return'] = pd.to_numeric(df['return'], errors='coerce')
+    returns[t] = df.set_index(['year','month'])['return'].to_dict()
 
-# RLSSA parameters
-RLSSA_WINDOW = 12
-RLSSA_RANK   = 2
+print(f"Found {len(files)} monthly‑revenue files.")
 
 # ----------------------------
 # Build selection history using RLSSA
@@ -122,37 +124,74 @@ while current <= final_end:
     ny, nm = (current + pd.DateOffset(months=1)).year, (current + pd.DateOffset(months=1)).month
 
     # compute each ticker's RLSSA score
-    scores = []
+    candidates = []
     for f in files:
         ticker = f.stem.replace("_Monthly_Revenues","")
         df     = pd.read_csv(f)
         df['return'] = pd.to_numeric(df['return'], errors='coerce')
         df['date']   = pd.to_datetime(df[['year','month']].assign(day=1))
-        df = df[(df['date'] >= start_date) & (df['date'] <= current)]
+        df = df[(df.date>=start_date)&(df.date<=current)]
         if LOOKBACK_YEARS is not None:
-            cutoff = current - relativedelta(years=LOOKBACK_YEARS) + relativedelta(days=1)
-            df     = df[df['date'] >= cutoff]
+            lb0 = current - relativedelta(years=LOOKBACK_YEARS) + relativedelta(months=1)
+            df = df[df.date>=lb0]
         if len(df) < RLSSA_WINDOW:
             continue
 
         series = df.set_index('date')['return'].sort_index()
         score  = rlssa_score(series, RLSSA_WINDOW, RLSSA_RANK)
         if pd.notna(score):
-            scores.append((abs(score), score, ticker))
+            candidates.append((abs(score), score, ticker))
 
-    if scores:
-        _, best_score, best_tkr = max(scores, key=lambda x: x[0])
-        sig = best_tkr if best_score > 0 else f"-{best_tkr}"
-        fname, mdf = find_contract(best_tkr, ny, nm)
-    else:
-        sig, fname, mdf = "NoContract", None, None
+    # split longs/shorts by sign of score
+    longs  = [(b,s,t) for b,s,t in candidates if s>0]
+    shorts = [(b,s,t) for b,s,t in candidates if s<0]
+
+    # select according to MODE
+    selected = []
+    if MODE=="Long":
+        longs.sort(key=lambda x:x[0],reverse=True)
+        if not (STRICT_SELECTION and len(longs)<NUM_SELECT):
+            selected = [t for _,_,t in longs[:NUM_SELECT]]
+    elif MODE=="Short":
+        shorts.sort(key=lambda x:x[0],reverse=True)
+        if not (STRICT_SELECTION and len(shorts)<NUM_SELECT):
+            selected = [f"-{t}" for _,_,t in shorts[:NUM_SELECT]]
+    else:  # LongShort
+        half = NUM_SELECT//2
+        longs.sort(key=lambda x:x[0],reverse=True)
+        shorts.sort(key=lambda x:x[0],reverse=True)
+        if not (STRICT_SELECTION and (len(longs)<half or len(shorts)<half)):
+            selected = [t for _,_,t in longs[:half]] + [f"-{t}" for _,_,t in shorts[:half]]
+
+    # fetch contract files & daily dfs
+    contract_files = []
+    daily_dfs      = {}
+    for sig in selected:
+        tkr = sig.lstrip('-')
+        fname, mdf = find_contract(tkr, ny, nm)
+        contract_files.append(fname)
+        daily_dfs[sig] = mdf
+
+    # per‐ticker monthly contributions
+    contribs   = []
+    combined_r = 0.0
+    n = len(selected) or 1
+    for sig in selected:
+        tkr  = sig.lstrip('-')
+        sign = -1 if sig.startswith('-') else 1
+        r    = returns[tkr].get((ny,nm), float('nan'))
+        w    = sign * r / n
+        combined_r += w
+        contribs.append(f"{sig}:{r:.2%}→{w:.2%}")
 
     history.append({
         'analysis_end':   current.strftime("%Y-%m-%d"),
         'forecast_month': f"{ny}-{nm:02d}",
-        'signal':         sig,
-        'contract_file':  fname,
-        'daily_df':       mdf
+        'signals':        selected,
+        'contract_files': contract_files,
+        'contribs':       contribs,
+        'combined_ret':   combined_r,
+        'daily_dfs':      daily_dfs
     })
     current += pd.DateOffset(months=1)
 
@@ -162,103 +201,102 @@ hist_df = pd.DataFrame(history)
 # Display selection table
 # ----------------------------
 display_df = hist_df[[
-    'analysis_end','forecast_month','signal','contract_file'
+    'analysis_end','forecast_month','signals',
+    'contract_files','contribs','combined_ret'
 ]]
 print(display_df.to_string(index=False))
 
-
 # ----------------------------
-# Daily‑compounded portfolio simulation
+# Daily‑compounded performance
 # ----------------------------
 vc_nc = vc_wc = START_VALUE
 dates, vals_nc, vals_wc = [], [], []
 
 for _, row in hist_df.iterrows():
-    fm = row['forecast_month']
-    year, month = map(int, fm.split('-'))
+    year, month = map(int, row['forecast_month'].split('-'))
     if not (plot_start <= datetime(year,month,1) <= plot_end):
         continue
 
-    sig = row['signal']
-    mdf = row['daily_df']
+    daily_dfs = row['daily_dfs']
+    n = len(daily_dfs)
 
-    # If no contract that month, hold flat
-    if mdf is None:
-        month_start = datetime(year, month, 1)
-        month_end   = month_start + pd.offsets.MonthEnd(0)
-        dates.append(month_start)
-        vals_nc.append(vc_nc); vals_wc.append(vc_wc)
-        dates.append(month_end)
-        vals_nc.append(vc_nc); vals_wc.append(vc_wc)
+    # if none, hold flat
+    if n == 0:
+        m0 = datetime(year,month,1); mend = m0+pd.offsets.MonthEnd(0)
+        dates += [m0, mend]; vals_nc += [vc_nc,vc_nc]; vals_wc += [vc_wc,vc_wc]
         continue
 
-    # Entry cost
-    vc_wc *= (1 - ENTRY_COST)
-    prev_close = None
+    # entry cost
+    vc_wc *= (1-ENTRY_COST)
 
-    for r in mdf.itertuples():
-        date  = r.Date
-        open_ = r.open
-        close = r.close
-        ratio = (close/open_) if prev_close is None else (close/prev_close)
-        prev_close = close
+    # concat daily
+    df_list = []
+    for sig,mdf in row['daily_dfs'].items():
+        tmp = mdf.copy(); tmp['signal']=sig
+        df_list.append(tmp.set_index('Date'))
+    df_all = pd.concat(df_list).sort_index()
 
-        sign = -1 if sig.startswith('-') else 1
-        vc_nc *= (1 + sign*(ratio-1))
-        vc_wc *= (1 + sign*(ratio-1))
+    prev_closes={sig:None for sig in daily_dfs}
+    for date,group in df_all.groupby(level=0):
+        ret_sum=0.0
+        for _,r2 in group.iterrows():
+            sig   = r2['signal']
+            prev  = prev_closes[sig]
+            r_val = (r2.close/r2.open -1) if prev is None else (r2.close/prev -1)
+            prev_closes[sig]=r2.close
+            weight=1.0/n
+            ret_sum += weight*(r_val if not sig.startswith('-') else -r_val)
+        vc_nc *= (1+ret_sum)
+        vc_wc *= (1+ret_sum)
+        dates.append(date); vals_nc.append(vc_nc); vals_wc.append(vc_wc)
 
-        dates.append(date)
-        vals_nc.append(vc_nc)
-        vals_wc.append(vc_wc)
+    vc_wc *= (1-EXIT_COST)
 
-    # Exit cost
-    vc_wc *= (1 - EXIT_COST)
-
-perf = pd.DataFrame({'Date':dates,'NoCosts':vals_nc,'WithCosts':vals_wc})
-perf.set_index('Date', inplace=True)
+perf = pd.DataFrame({'Date':dates,'NoCosts':vals_nc,'WithCosts':vals_wc}).set_index('Date')
 
 # ----------------------------
-# Plot performance
+# Plot performance (total‐period returns)
 # ----------------------------
+initial_val=perf['NoCosts'].iloc[0]
+final_nc   =perf['NoCosts'].iloc[-1]
+final_wc   =perf['WithCosts'].iloc[-1]
+tot_nc     =(final_nc/initial_val-1)*100
+tot_wc     =(final_wc/initial_val-1)*100
+
 plt.figure(figsize=(10,6))
-plt.plot(perf.index, perf['NoCosts'], label='No Costs')
-plt.plot(perf.index, perf['WithCosts'], label='With Costs')
+plt.plot(perf.index, perf['NoCosts'],
+         label=f'No Costs (Total: {tot_nc:.2f}%)')
+plt.plot(perf.index, perf['WithCosts'],
+         label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
-plt.title('Seasonal Strategy via RLSSA Daily‑Compounded')
-ax = plt.gca()
+plt.title('Seasonal RLSSA Strategy Daily‑Compounded')
+ax=plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 plt.legend(); plt.grid(True)
-plt.xlim(plot_start, plot_end)
-plt.tight_layout()
-plt.show()
-
+plt.xlim(plot_start,plot_end); plt.tight_layout(); plt.show()
 
 # ----------------------------
 # Helper to inspect daily returns
 # ----------------------------
-def show_daily_returns_and_monthly_return(year: int, month: int):
+def show_daily_returns_and_monthly_return(year:int,month:int):
     fm  = f"{year}-{month:02d}"
     row = hist_df.loc[hist_df['forecast_month']==fm].squeeze()
-    if row.empty or row.daily_df is None:
-        print(f"No data for forecast month {fm}.")
-        return None
+    if row.empty or not row['daily_dfs']:
+        print(f"No data for forecast month {fm}."); return
+    print(f"Forecast {fm} → signals={row['signals']}")
+    for sig,mdf in row['daily_dfs'].items():
+        prev,rets=None,[]
+        for r in mdf.itertuples():
+            ret=(r.close/r.open -1) if prev is None else (r.close/prev -1)
+            rets.append(ret); prev=r.close
+        tmp=mdf.copy(); tmp['daily_return']=rets
+        idx=row['signals'].index(sig)
+        cf =row['contract_files'][idx]
+        print(f"\n--- {sig} ({cf}) ---")
+        print(tmp[['Date','open','close','daily_return','volume']].to_string(index=False))
 
-    sig      = row.signal
-    fname    = row.contract_file
-    mdf      = row.daily_df.copy().sort_values("Date")
-
-    print(f"Forecast {fm} → signal = {sig}, contract = {fname}")
-    prev, rets = None, []
-    for r in mdf.itertuples():
-        ret = (r.close/r.open - 1) if prev is None else (r.close/prev - 1)
-        rets.append(ret); prev = r.close
-
-    mdf['daily_return'] = rets
-    print(mdf[["Date","open","close","daily_return","volume"]].to_string(index=False))
-    return mdf
-
-# === Example ===
-show_daily_returns_and_monthly_return(2020, 3)
-show_daily_returns_and_monthly_return(2020, 4)
+# === Examples ===
+show_daily_returns_and_monthly_return(2020,3)
+show_daily_returns_and_monthly_return(2020,4)
