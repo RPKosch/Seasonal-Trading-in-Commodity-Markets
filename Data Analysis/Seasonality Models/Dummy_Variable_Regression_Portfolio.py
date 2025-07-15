@@ -101,9 +101,9 @@ while current <= final_end:
                       cov_type='HAC', cov_kwds={'maxlags':1})
         beta, pval = model.params['D'], model.pvalues['D']
 
-        # require significance **and** positive raw average return
+        # require significance, and avg_m has same sign as beta
         avg_m = df.loc[df['month']==nm, 'return'].mean()
-        if pval <= 0.05 and avg_m > 0:
+        if pval <= 0.05 and ((beta > 0 and avg_m > 0) or (beta < 0 and avg_m < 0)):
             sig = ticker if beta > 0 else f"-{ticker}"
             candidates.append((abs(beta), sig, ticker))
 

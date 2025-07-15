@@ -75,12 +75,17 @@ for file_path in files:
 
     all_results.append(pd.DataFrame(results))
 
-    # Find candidate for next_month (require p ≤ .05 and positive avg return)
+    # Find candidate for next_month:
+    # ‣ LONG if coef_diff>0, p≤0.05 & avg_return_month>0
+    # ‣ SHORT if coef_diff<0, p≤0.05 & avg_return_month<0
     candidate = [
         r for r in results
         if r['month'] == next_month
         and r['p_value'] <= 0.05
-        and r['avg_return_month'] > 0
+        and (
+            (r['coef_diff'] > 0 and r['avg_return_month'] > 0) or
+            (r['coef_diff'] < 0 and r['avg_return_month'] < 0)
+        )
     ]
     if candidate:
         # pick the one with the largest |coef_diff|
