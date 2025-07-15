@@ -8,11 +8,10 @@ from dateutil.relativedelta import relativedelta
 # ----------------------------
 # User‑adjustable parameters
 # ----------------------------
-TICKER         = "CC"    # Ticker to analyze
-START_YEAR, START_MONTH     = 2001, 1    # Analysis start Date (inclusive)
-END_YEAR, END_MONTH       = 2001, 8    # Analysis end Date (inclusive)
-START_VALUE    = 1000.0  # Starting portfolio value in CHF
-MIN_DAYS_AFTER = 15      # Min days beyond month‑end for liquidity
+TICKER =                    "HO"    # Ticker to analyze
+START_YEAR, START_MONTH =   2001, 1    # Analysis start Date (inclusive)
+END_YEAR, END_MONTH =       2001, 8    # Analysis end Date (inclusive)
+START_VALUE =               1000.0  # Starting portfolio value in CHF
 
 def month_range_by_ym(sy, sm, ey, em):
     """Yield (year, month) from (sy,sm) to (ey,em) inclusive."""
@@ -31,7 +30,7 @@ def find_contract_file(data_root: Path, ticker: str, year: int, month: int) -> P
         if not p.exists():
             continue
         df = pd.read_csv(p, parse_dates=["Date"])
-        if df["Date"].max() >= month_end + timedelta(days=MIN_DAYS_AFTER):
+        if df["Date"].max() >= month_end:
             return p
     return None
 
