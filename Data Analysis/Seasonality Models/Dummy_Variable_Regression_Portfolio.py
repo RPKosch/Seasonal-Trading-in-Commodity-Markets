@@ -17,10 +17,11 @@ FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = None      # or None for full history
-NUM_SELECT       = 1
+LOOKBACK_YEARS   = 10      # or None for full history
+NUM_SELECT       = 2
 STRICT_SELECTION = True
-MODE             = "Long"  # "Long", "Short", or "LongShort"
+MODE             = "LongShort"  # "Long", "Short", or "LongShort"
+significance_level = 0.05
 
 PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
 PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
@@ -100,7 +101,7 @@ while current <= final_end:
         beta, pval = model.params['D'], model.pvalues['D']
         avg_m      = df.loc[df.month==nm,'return'].mean()
 
-        if pval<=0.05 and ((beta>0 and avg_m>0) or (beta<0 and avg_m<0)):
+        if pval <= significance_level and ((beta>0 and avg_m>0) or (beta<0 and avg_m<0)):
             sig = ticker if beta>0 else f"-{ticker}"
             candidates.append((abs(beta), sig, ticker))
 
@@ -240,6 +241,10 @@ final_wc    = perf['WithCosts'].iloc[-1]
 tot_nc      = (final_nc / initial_val - 1) * 100
 tot_wc      = (final_wc / initial_val - 1) * 100
 
+title_str = f"DVR_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y_SL_{significance_level}.png"
+output_dir = Path("plots/DVR_Plots")
+output_dir.mkdir(exist_ok=True)
+
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
          label=f'No Costs (Total: {tot_nc:.2f}%)')
@@ -247,7 +252,7 @@ plt.plot(perf.index, perf['WithCosts'],
          label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date')
 plt.ylabel('Portfolio Value (CHF)')
-plt.title('Seasonal Strategy Daily‑Compounded')
+plt.title(f'DVR {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {significance_level}')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
@@ -256,7 +261,11 @@ plt.legend()
 plt.grid(True)
 plt.xlim(plot_start, plot_end)
 plt.tight_layout()
-plt.show()
+#plt.show()
+
+# Save to disk
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
 
 
 

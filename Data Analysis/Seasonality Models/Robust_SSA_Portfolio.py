@@ -18,10 +18,10 @@ FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = None      # or None for full history
+LOOKBACK_YEARS   = 10      # or None for full history
 NUM_SELECT       = 1
 STRICT_SELECTION = True
-MODE             = "Long"  # "Long", "Short", or "LongShort"
+MODE             = "Short"  # "Long", "Short", or "LongShort"
 
 PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
 PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
@@ -263,19 +263,31 @@ final_wc   =perf['WithCosts'].iloc[-1]
 tot_nc     =(final_nc/initial_val-1)*100
 tot_wc     =(final_wc/initial_val-1)*100
 
+title_str = f"RLSSA_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y.png"
+output_dir = Path("plots/RLSSA_Plots")
+output_dir.mkdir(exist_ok=True)
+
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
          label=f'No Costs (Total: {tot_nc:.2f}%)')
 plt.plot(perf.index, perf['WithCosts'],
          label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
-plt.title('Seasonal RLSSA Strategy Daily‑Compounded')
+plt.title(f'RLSSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years')
 ax=plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 plt.legend(); plt.grid(True)
-plt.xlim(plot_start,plot_end); plt.tight_layout(); plt.show()
+plt.xlim(plot_start,plot_end);
+plt.tight_layout();
+#plt.show()
+
+# Save to disk
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=600)
+
+
 
 # ----------------------------
 # Helper to inspect daily returns

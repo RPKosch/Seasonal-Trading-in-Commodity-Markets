@@ -18,10 +18,10 @@ FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = None      # or None for full history
-NUM_SELECT       = 1
+LOOKBACK_YEARS   = 10      # or None for full history
+NUM_SELECT       = 2
 STRICT_SELECTION = True
-MODE             = "Long"  # "Long", "Short", or "LongShort"
+MODE             = "LongShort"  # "Long", "Short", or "LongShort"
 
 PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
 PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
@@ -253,6 +253,10 @@ perf = pd.DataFrame(
     {'Date':dates,'NoCosts':vals_nc,'WithCosts':vals_wc}
 ).set_index('Date')
 
+title_str = f"SSA_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y.png"
+output_dir = Path("plots/SSA_Plots")
+output_dir.mkdir(exist_ok=True)
+
 # ----------------------------
 # Plot performance (with total‐period returns)
 # ----------------------------
@@ -268,13 +272,19 @@ plt.plot(perf.index, perf['NoCosts'],
 plt.plot(perf.index, perf['WithCosts'],
          label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
-plt.title('Seasonal SSA Strategy Daily‑Compounded')
+plt.title(f'SSL {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 plt.legend(); plt.grid(True)
-plt.xlim(plot_start, plot_end); plt.tight_layout(); plt.show()
+plt.xlim(plot_start, plot_end);
+plt.tight_layout();
+#plt.show()
+
+# Save to disk
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
 
 # ----------------------------
 # Helper to inspect daily returns
