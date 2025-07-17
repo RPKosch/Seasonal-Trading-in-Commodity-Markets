@@ -1,4 +1,5 @@
 import re
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
@@ -7,9 +8,9 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import matplotlib.dates as mdates
 
-# ----------------------------
-# Parameters (month-based)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 1) PARAMETERS
+# -----------------------------------------------------------------------------
 START_YEAR, START_MONTH             = 2001, 1
 INITIAL_END_YEAR, INITIAL_END_MONTH = 2010, 12
 FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
@@ -17,27 +18,30 @@ FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = 10      # or None for full history
-NUM_SELECT       = 2
+LOOKBACK_YEARS   = 10       # or None for full history
+NUM_SELECT       = 1
 STRICT_SELECTION = True
-MODE             = "LongShort"  # "Long", "Short", or "LongShort"
-significance_level = 0.05
+MODE             = "Long"  # "Long", "Short", or "LongShort"
+SIG_LEVEL        = 0.05
 
 PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
 PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
 
-# ----------------------------
-# Convert to datetime endpoints
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 2) DATE ENDPOINTS
+# -----------------------------------------------------------------------------
 start_date  = datetime(START_YEAR, START_MONTH, 1)
-initial_end = datetime(INITIAL_END_YEAR, INITIAL_END_MONTH, 1) + pd.offsets.MonthEnd(0)
-final_end   = datetime(FINAL_END_YEAR, FINAL_END_MONTH, 1) + pd.offsets.MonthEnd(0)
+initial_end = (datetime(INITIAL_END_YEAR, INITIAL_END_MONTH, 1)
+               + pd.offsets.MonthEnd(0))
+final_end   = (datetime(FINAL_END_YEAR, FINAL_END_MONTH, 1)
+               + pd.offsets.MonthEnd(0))
 plot_start  = datetime(PLOT_START_YEAR, PLOT_START_MONTH, 1)
-plot_end    = datetime(PLOT_END_YEAR,   PLOT_END_MONTH,   1) + pd.offsets.MonthEnd(0)
+plot_end    = (datetime(PLOT_END_YEAR, PLOT_END_MONTH, 1)
+               + pd.offsets.MonthEnd(0))
 
-# ----------------------------
-# Contract‑finder
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 3) CONTRACT‑FINDER
+# -----------------------------------------------------------------------------
 def find_contract(ticker: str, year: int, month: int):
     root    = Path().resolve().parent.parent / "Complete Data" / f"{ticker}_Historic_Data"
     m0      = datetime(year, month, 1)
@@ -54,196 +58,185 @@ def find_contract(ticker: str, year: int, month: int):
         if df.Date.max() < mend + timedelta(days=15): continue
         mdf = df[(df.Date>=m0)&(df.Date<=mend)]
         if mdf.empty: continue
-        candidates.append((diff, p.name, mdf.sort_values("Date")))
+        candidates.append((diff, mdf.sort_values("Date")))
     if not candidates:
         return None, None
-    _, fname, mdf = min(candidates, key=lambda x: x[0])
-    return fname, mdf
+    _, mdf = min(candidates, key=lambda x: x[0])
+    return ticker, mdf
 
-# ----------------------------
-# Load monthly returns into dict
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 4) LOAD RETURNS
+# -----------------------------------------------------------------------------
 monthly_dir = Path().resolve().parent.parent / "Complete Data" / "All_Monthly_Return_Data"
 files       = list(monthly_dir.glob("*_Monthly_Revenues.csv"))
-returns     = {}
+
+returns = {}
 for f in files:
-    t = f.stem.replace("_Monthly_Revenues","")
-    df = pd.read_csv(f)
+    tkr = f.stem.replace("_Monthly_Revenues", "")
+    df  = pd.read_csv(f)
+    df['date']   = pd.to_datetime(df[['year','month']].assign(day=1))
     df['return'] = pd.to_numeric(df['return'], errors='coerce')
-    returns[t] = df.set_index(['year','month'])['return'].to_dict()
+    returns[tkr] = df.set_index('date')['return'].sort_index()
 
-print(f"Found {len(files)} monthly‐revenue files.")
+print(f"Loaded returns for {len(returns)} tickers.")
 
-# ----------------------------
-# Build selection history
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 5) BUILD SELECTION HISTORY VIA DUMMY REGRESSION
+# -----------------------------------------------------------------------------
 history = []
 current = initial_end
+
 while current <= final_end:
-    ny, nm = (current + pd.DateOffset(months=1)).year, (current + pd.DateOffset(months=1)).month
+    # next forecast month
+    fc = current + pd.offsets.MonthBegin(1)
+    nm = fc.month
+
     candidates = []
-
-    for f in files:
-        ticker = f.stem.replace("_Monthly_Revenues","")
-        df     = pd.read_csv(f)
-        df['return'] = pd.to_numeric(df['return'], errors='coerce')
-        df['date']   = pd.to_datetime(df[['year','month']].assign(day=1))
-        df = df[(df.date>=start_date)&(df.date<=current)]
+    for tkr, series in returns.items():
+        # slice lookback
+        df = series.loc[:current].to_frame(name='return')
         if LOOKBACK_YEARS is not None:
-            lb0 = current - relativedelta(years=LOOKBACK_YEARS) + relativedelta(months=1)
-            df = df[df.date>=lb0]
-        df['month'] = df.date.dt.month
-        if len(df)<12: continue
+            cutoff = current - relativedelta(years=LOOKBACK_YEARS) + relativedelta(months=1)
+            df = df[df.index >= cutoff]
+        if len(df) < 12:
+            continue
 
-        df['D'] = (df.month==nm).astype(float)
-        model  = sm.OLS(df['return'], sm.add_constant(df['D'])).fit(
-                    cov_type='HAC', cov_kwds={'maxlags':1})
-        beta, pval = model.params['D'], model.pvalues['D']
-        avg_m      = df.loc[df.month==nm,'return'].mean()
+        df = df.copy()
+        df['month'] = df.index.month
+        df['D'] = (df['month'] == nm).astype(float)
 
-        if pval <= significance_level and ((beta>0 and avg_m>0) or (beta<0 and avg_m<0)):
-            sig = ticker if beta>0 else f"-{ticker}"
-            candidates.append((abs(beta), sig, ticker))
+        # OLS regression with HAC(1)
+        X     = sm.add_constant(df['D'])
+        model = sm.OLS(df['return'], X).fit(cov_type='HAC', cov_kwds={'maxlags':1})
+        beta  = model.params['D']
+        pval  = model.pvalues['D']
+        avg_m = df.loc[df['month'] == nm, 'return'].mean()
 
+        # select if significant and directionally consistent
+        if pval <= SIG_LEVEL and beta * avg_m > 0:
+            sig = tkr if beta > 0 else f"-{tkr}"
+            candidates.append((abs(beta), sig, tkr))
+
+    # split longs/shorts and sort by |beta|
     longs  = [(b,s,t) for b,s,t in candidates if not s.startswith('-')]
-    shorts = [(b,s,t) for b,s,t in candidates if  s.startswith('-')]
+    shorts = [(b,s,t) for b,s,t in candidates if s.startswith('-')]
 
     selected = []
-    if MODE=="Long":
-        longs.sort(key=lambda x:x[0],reverse=True)
-        if not (STRICT_SELECTION and len(longs)<NUM_SELECT):
+    if MODE == "Long":
+        longs.sort(key=lambda x: x[0], reverse=True)
+        if not (STRICT_SELECTION and len(longs) < NUM_SELECT):
             selected = [s for _,s,_ in longs[:NUM_SELECT]]
-    elif MODE=="Short":
-        shorts.sort(key=lambda x:x[0],reverse=True)
-        if not (STRICT_SELECTION and len(shorts)<NUM_SELECT):
+    elif MODE == "Short":
+        shorts.sort(key=lambda x: x[0], reverse=True)
+        if not (STRICT_SELECTION and len(shorts) < NUM_SELECT):
             selected = [s for _,s,_ in shorts[:NUM_SELECT]]
     else:  # LongShort
-        half = NUM_SELECT//2
-        longs.sort(key=lambda x:x[0],reverse=True)
-        shorts.sort(key=lambda x:x[0],reverse=True)
-        if not (STRICT_SELECTION and (len(longs)<half or len(shorts)<half)):
+        half = NUM_SELECT // 2
+        longs.sort(key=lambda x: x[0], reverse=True)
+        shorts.sort(key=lambda x: x[0], reverse=True)
+        if not (STRICT_SELECTION and (len(longs) < half or len(shorts) < half)):
             selected = [s for _,s,_ in longs[:half]] + [s for _,s,_ in shorts[:half]]
 
-    # fetch contract files & daily dfs
-    contract_files = []
-    daily_dfs      = {}
+    # fetch contracts and compute contributions
+    daily_dfs, contribs = {}, []
+    comb = 0.0
+    n    = max(1, len(selected))
     for sig in selected:
-        tkr = sig.lstrip('-')
-        fname, mdf = find_contract(tkr, ny, nm)
-        contract_files.append(fname)
+        tkr, mdf = find_contract(sig.lstrip('-'), fc.year, fc.month)
         daily_dfs[sig] = mdf
-
-    # compute per‐ticker monthly shares
-    contribs   = []
-    combined_r = 0.0
-    n = len(selected) or 1
-    for sig in selected:
-        tkr  = sig.lstrip('-')
-        sign = -1 if sig.startswith('-') else 1
-        r    = returns[tkr].get((ny,nm), float('nan'))
-        w    = sign * r / n
-        combined_r += w
+        r = returns[sig.lstrip('-')].get(datetime(fc.year, fc.month, 1), np.nan)
+        w = (-r if sig.startswith('-') else r) / n
+        comb += w
         contribs.append(f"{sig}:{r:.2%}→{w:.2%}")
 
     history.append({
-        'analysis_end':   current.strftime("%Y-%m-%d"),
-        'forecast_month': f"{ny}-{nm:02d}",
+        'analysis_end':   current,
+        'forecast_month': fc,
         'signals':        selected,
-        'contract_files': contract_files,
         'contribs':       contribs,
-        'combined_ret':   combined_r,
+        'combined_ret':   comb,
         'daily_dfs':      daily_dfs
     })
+
     current += pd.DateOffset(months=1)
 
 hist_df = pd.DataFrame(history)
 
-# ----------------------------
-# Display selection table
-# ----------------------------
-display_df = hist_df[[
-    'analysis_end','forecast_month','signals',
-    'contract_files','contribs','combined_ret'
-]]
-print(display_df.to_string(index=False))
+# -----------------------------------------------------------------------------
+# 6) DISPLAY SELECTION HISTORY
+# -----------------------------------------------------------------------------
+print(hist_df[[
+    'analysis_end','forecast_month','signals','contribs','combined_ret'
+]].to_string(index=False))
 
-
-# ----------------------------
-# Daily‑compounded performance
-# ----------------------------
+# -----------------------------------------------------------------------------
+# 7) DAILY‑COMPOUNDED PERFORMANCE
+# -----------------------------------------------------------------------------
 vc_nc = vc_wc = START_VALUE
 dates, vals_nc, vals_wc = [], [], []
 
 for _, row in hist_df.iterrows():
-    year, month = map(int, row['forecast_month'].split('-'))
-    if not (plot_start <= datetime(year, month, 1) <= plot_end):
+    fc = row['forecast_month']
+    if not (plot_start <= fc <= plot_end):
         continue
 
     daily_dfs = row['daily_dfs']
-    # how many contracts did we actually pick?
-    n = len(daily_dfs)
 
-    # if no positions, just hold flat for the month
-    if n == 0:
-        m0 = datetime(year, month, 1)
-        mend = m0 + pd.offsets.MonthEnd(0)
+    # handle months with no positions
+    if not daily_dfs:
+        m0   = fc
+        mend = fc + pd.offsets.MonthEnd(0)
         dates += [m0, mend]
         vals_nc += [vc_nc, vc_nc]
         vals_wc += [vc_wc, vc_wc]
         continue
 
-    # entry cost equally split
     vc_wc *= (1 - ENTRY_COST)
 
-    # build an aligned date index of all contracts (flat DataFrame)
+    # build and concat daily Price DataFrames
     df_list = []
+    prevs   = {}
     for sig, mdf in daily_dfs.items():
         tmp = mdf.copy()
         tmp['signal'] = sig
         df_list.append(tmp.set_index('Date'))
+        prevs[sig] = None
+
     df_all = pd.concat(df_list).sort_index()
 
-    prev_closes = {sig: None for sig in daily_dfs}
-
-    # iterate day by day
-    for date, group in df_all.groupby(level=0):
+    for date, grp in df_all.groupby(level=0):
         ret_sum = 0.0
-        for _, row2 in group.iterrows():
-            sig = row2['signal']
-            prev = prev_closes[sig]
-            r = (row2.close / row2.open - 1) if prev is None else (row2.close / prev - 1)
-            prev_closes[sig] = row2.close
-            # equally weight each position
-            weight = 1.0 / n
-            ret_sum += weight * (r if not sig.startswith('-') else -r)
+        for r in grp.itertuples():
+            sig = r.signal
+            prev = prevs[sig]
+            rt   = (r.close / r.open - 1) if prev is None else (r.close / prev - 1)
+            if sig.startswith('-'):
+                rt = -rt
+            ret_sum += rt / len(daily_dfs)
+            prevs[sig] = r.close
 
-        # apply daily return
         vc_nc *= (1 + ret_sum)
         vc_wc *= (1 + ret_sum)
         dates.append(date)
         vals_nc.append(vc_nc)
         vals_wc.append(vc_wc)
 
-    # exit cost
     vc_wc *= (1 - EXIT_COST)
 
-# build final DataFrame
-perf = pd.DataFrame({'Date': dates, 'NoCosts': vals_nc, 'WithCosts': vals_wc}).set_index('Date')
+perf = pd.DataFrame({
+    'Date': dates,
+    'NoCosts': vals_nc,
+    'WithCosts': vals_wc
+}).set_index('Date')
 
-
-# ----------------------------
-# Plot performance (with total‐period returns in legend)
-# ----------------------------
-# Compute total returns
+# -----------------------------------------------------------------------------
+# 8) PLOT PERFORMANCE
+# -----------------------------------------------------------------------------
 initial_val = perf['NoCosts'].iloc[0]
 final_nc    = perf['NoCosts'].iloc[-1]
 final_wc    = perf['WithCosts'].iloc[-1]
-tot_nc      = (final_nc / initial_val - 1) * 100
-tot_wc      = (final_wc / initial_val - 1) * 100
-
-title_str = f"DVR_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y_SL_{significance_level}.png"
-output_dir = Path("plots/DVR_Plots")
-output_dir.mkdir(exist_ok=True)
+tot_nc      = (final_nc/initial_val - 1)*100
+tot_wc      = (final_wc/initial_val - 1)*100
 
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
@@ -252,7 +245,7 @@ plt.plot(perf.index, perf['WithCosts'],
          label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date')
 plt.ylabel('Portfolio Value (CHF)')
-plt.title(f'DVR {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {significance_level}')
+plt.title(f"Dummy‑OLS {MODE} Portfolio: {NUM_SELECT} Assets, {LOOKBACK_YEARS}Y Lookback")
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
@@ -261,34 +254,4 @@ plt.legend()
 plt.grid(True)
 plt.xlim(plot_start, plot_end)
 plt.tight_layout()
-#plt.show()
-
-# Save to disk
-save_path = output_dir / title_str
-plt.savefig(save_path, dpi=300)
-
-
-
-# ----------------------------
-# Helper to inspect daily returns
-# ----------------------------
-def show_daily_returns_and_monthly_return(year: int, month: int):
-    fm  = f"{year}-{month:02d}"
-    row = hist_df.loc[hist_df['forecast_month']==fm].squeeze()
-    if row.empty or not row['daily_dfs']:
-        print(f"No data for forecast month {fm}.")
-        return
-
-    print(f"Forecast {fm} → signals={row['signals']}")
-    for sig, mdf in row['daily_dfs'].items():
-        prev, rets = None, []
-        for r in mdf.itertuples():
-            ret = (r.close/r.open -1) if prev is None else (r.close/prev -1)
-            rets.append(ret); prev=r.close
-        mdf = mdf.copy(); mdf['daily_return']=rets
-        print(f"\n--- {sig} ({row['contract_files'][row['signals'].index(sig)]}) ---")
-        print(mdf[['Date','open','close','daily_return','volume']].to_string(index=False))
-
-# === Examples ===
-show_daily_returns_and_monthly_return(2020,3)
-show_daily_returns_and_monthly_return(2020,4)
+plt.show()

@@ -11,7 +11,7 @@ q                   = 2     # Number of L1‐robust components
 K_SELECT            = 2     # How many tickers to long/short
 # Define analysis window by year & month:
 START_YEAR, START_MONTH             = 2001, 1
-FINAL_END_YEAR, FINAL_END_MONTH     = 2025, 4
+FINAL_END_YEAR, FINAL_END_MONTH     = 2010, 12
 # Lookback in years (None => full history)
 LOOKBACK_YEARS      = None
 

@@ -9,7 +9,7 @@ L          = 12        # SSA window length
 J          = 2         # Number of components to reconstruct
 K_SELECT   = 2         # How many tickers to long/short
 # Define analysis window by year & month:
-START_YEAR, START_MONTH             = 2001, 1
+START_YEAR, START_MONTH             = 2014, 12
 FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 11
 # Lookback in years (None => full history)
 LOOKBACK_YEARS   = None
