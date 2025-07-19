@@ -18,14 +18,17 @@ FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 12
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = 10       # or None for full history
+LOOKBACK_YEARS   = None       # or None for full history
 NUM_SELECT       = 1
 STRICT_SELECTION = True
-MODE             = "Long"  # "Long", "Short", or "LongShort"
+MODE             = "Short"   # "Long", "Short", or "LongShort"
 SIG_LEVEL        = 0.05
 
 PLOT_START_YEAR, PLOT_START_MONTH = 2011, 1
 PLOT_END_YEAR,   PLOT_END_MONTH   = 2024, 12
+
+DEBUG = True
+DEBUG_DATE = datetime(2024, 10, 1) #+ pd.offsets.MonthEnd(0)
 
 # -----------------------------------------------------------------------------
 # 2) DATE ENDPOINTS
@@ -67,18 +70,34 @@ def find_contract(ticker: str, year: int, month: int):
 # -----------------------------------------------------------------------------
 # 4) LOAD RETURNS
 # -----------------------------------------------------------------------------
-monthly_dir = Path().resolve().parent.parent / "Complete Data" / "All_Monthly_Return_Data"
-files       = list(monthly_dir.glob("*_Monthly_Revenues.csv"))
+def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
+    """
+    Loads all “*_Monthly_Revenues.csv” files from root_dir,
+    parses year/month → datetime, coerces returns to numeric,
+    and returns a dict ticker → pd.Series indexed by date.
+    """
+    out: dict[str, pd.Series] = {}
+    for path in sorted(root_dir.glob("*_Monthly_Revenues.csv")):
+        ticker = path.stem.replace("_Monthly_Revenues", "")
+        df = pd.read_csv(path)
 
-returns = {}
-for f in files:
-    tkr = f.stem.replace("_Monthly_Revenues", "")
-    df  = pd.read_csv(f)
-    df['date']   = pd.to_datetime(df[['year','month']].assign(day=1))
-    df['return'] = pd.to_numeric(df['return'], errors='coerce')
-    returns[tkr] = df.set_index('date')['return'].sort_index()
+        # build a proper datetime index
+        df['date'] = pd.to_datetime(df[['year','month']].assign(day=1))
 
-print(f"Loaded returns for {len(returns)} tickers.")
+        # coerce the return column
+        df['return'] = pd.to_numeric(df['return'], errors='coerce')
+
+        # extract a Series indexed by date
+        series = df.set_index('date')['return'].sort_index()
+
+        out[ticker] = series
+
+    return out
+
+base = Path().resolve().parent.parent / "Complete Data"
+
+returns    = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
+simple_returns = load_monthly_returns(base / "All_Monthly_Return_Data")
 
 # -----------------------------------------------------------------------------
 # 5) BUILD SELECTION HISTORY VIA DUMMY REGRESSION
@@ -86,7 +105,7 @@ print(f"Loaded returns for {len(returns)} tickers.")
 history = []
 current = initial_end
 
-while current <= final_end:
+while current < final_end:
     # next forecast month
     fc = current + pd.offsets.MonthBegin(1)
     nm = fc.month
@@ -96,7 +115,7 @@ while current <= final_end:
         # slice lookback
         df = series.loc[:current].to_frame(name='return')
         if LOOKBACK_YEARS is not None:
-            cutoff = current - relativedelta(years=LOOKBACK_YEARS) + relativedelta(months=1)
+            cutoff = current - relativedelta(years=LOOKBACK_YEARS)
             df = df[df.index >= cutoff]
         if len(df) < 12:
             continue
@@ -111,6 +130,12 @@ while current <= final_end:
         beta  = model.params['D']
         pval  = model.pvalues['D']
         avg_m = df.loc[df['month'] == nm, 'return'].mean()
+
+        # debug: dump this ticker’s regression on DEBUG_DATE
+        if fc == DEBUG_DATE and DEBUG == True:
+            print(f"\n[DEBUG] {tkr} @ {DEBUG_DATE.date()}")
+            print("Data sample:\n", df)
+            print(model.summary())
 
         # select if significant and directionally consistent
         if pval <= SIG_LEVEL and beta * avg_m > 0:
@@ -137,6 +162,12 @@ while current <= final_end:
         if not (STRICT_SELECTION and (len(longs) < half or len(shorts) < half)):
             selected = [s for _,s,_ in longs[:half]] + [s for _,s,_ in shorts[:half]]
 
+    # debug: list all candidates and final picks on DEBUG_DATE
+    if fc == DEBUG_DATE:
+        print(f"[DEBUG] All candidates @ {DEBUG_DATE.date()}:\n", pd.DataFrame(candidates, columns=['|β|','signal','ticker']))
+        print(f"[DEBUG] Selected signals @ {DEBUG_DATE.date()}:", selected)
+        print()
+
     # fetch contracts and compute contributions
     daily_dfs, contribs = {}, []
     comb = 0.0
@@ -144,7 +175,7 @@ while current <= final_end:
     for sig in selected:
         tkr, mdf = find_contract(sig.lstrip('-'), fc.year, fc.month)
         daily_dfs[sig] = mdf
-        r = returns[sig.lstrip('-')].get(datetime(fc.year, fc.month, 1), np.nan)
+        r = simple_returns[sig.lstrip('-')].get(datetime(fc.year, fc.month, 1), np.nan)
         w = (-r if sig.startswith('-') else r) / n
         comb += w
         contribs.append(f"{sig}:{r:.2%}→{w:.2%}")
@@ -160,7 +191,7 @@ while current <= final_end:
 
     current += pd.DateOffset(months=1)
 
-hist_df = pd.DataFrame(history)
+hist_df = pd.DataFrame(history)[0:-1]
 
 # -----------------------------------------------------------------------------
 # 6) DISPLAY SELECTION HISTORY
@@ -194,8 +225,7 @@ for _, row in hist_df.iterrows():
     vc_wc *= (1 - ENTRY_COST)
 
     # build and concat daily Price DataFrames
-    df_list = []
-    prevs   = {}
+    df_list = []; prevs = {}
     for sig, mdf in daily_dfs.items():
         tmp = mdf.copy()
         tmp['signal'] = sig
@@ -204,12 +234,15 @@ for _, row in hist_df.iterrows():
 
     df_all = pd.concat(df_list).sort_index()
 
+    if DEBUG and not df_all.loc[DEBUG_DATE - pd.offsets.Day(2): DEBUG_DATE + pd.offsets.MonthEnd(0)].empty:
+        print(df_all.loc[DEBUG_DATE - pd.offsets.Day(2): DEBUG_DATE + pd.offsets.MonthEnd(0)])
+
     for date, grp in df_all.groupby(level=0):
         ret_sum = 0.0
         for r in grp.itertuples():
             sig = r.signal
             prev = prevs[sig]
-            rt   = (r.close / r.open - 1) if prev is None else (r.close / prev - 1)
+            rt   = (r.close/r.open - 1) if prev is None else (r.close/prev - 1)
             if sig.startswith('-'):
                 rt = -rt
             ret_sum += rt / len(daily_dfs)
@@ -229,6 +262,9 @@ perf = pd.DataFrame({
     'WithCosts': vals_wc
 }).set_index('Date')
 
+if (DEBUG):
+    print(perf.loc[DEBUG_DATE - pd.offsets.Day(2) : DEBUG_DATE + pd.offsets.MonthEnd(0)])
+
 # -----------------------------------------------------------------------------
 # 8) PLOT PERFORMANCE
 # -----------------------------------------------------------------------------
@@ -238,6 +274,10 @@ final_wc    = perf['WithCosts'].iloc[-1]
 tot_nc      = (final_nc/initial_val - 1)*100
 tot_wc      = (final_wc/initial_val - 1)*100
 
+title_str = f"DVR_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}.png"
+output_dir = Path("plots/DVR_Plots")
+output_dir.mkdir(exist_ok=True)
+
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
          label=f'No Costs (Total: {tot_nc:.2f}%)')
@@ -245,7 +285,7 @@ plt.plot(perf.index, perf['WithCosts'],
          label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date')
 plt.ylabel('Portfolio Value (CHF)')
-plt.title(f"Dummy‑OLS {MODE} Portfolio: {NUM_SELECT} Assets, {LOOKBACK_YEARS}Y Lookback")
+plt.title(f'DVR {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL}')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_minor_locator(mdates.MonthLocator())
@@ -254,4 +294,7 @@ plt.legend()
 plt.grid(True)
 plt.xlim(plot_start, plot_end)
 plt.tight_layout()
-plt.show()
+#plt.show()
+
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
