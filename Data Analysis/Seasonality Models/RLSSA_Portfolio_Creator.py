@@ -1,6 +1,7 @@
 import re
 import numpy as np
 import pandas as pd
+import scipy.linalg as la
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -15,18 +16,19 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
+NUM_SELECT      = 2
+STRICT_SEL      = False
+MODE            = "LongShort" # "Long", "Short", or "LongShort"
+SIG_LEVEL       = 1
+
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
-SIG_LEVEL       = 0.05
-NUM_SELECT      = 2
-STRICT_SEL      = True
-MODE            = "LongShort"   # "Long", "Short", or "LongShort"
 
 ENTRY_COST      = EXIT_COST = 0.0025
 START_VALUE     = 1000.0
 PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
-DEBUG_DATE      = datetime(2016, 8, 1)
+DEBUG_DATE      = datetime(2016, 1, 1)
 
 # Data paths
 ROOT_DIR    = Path().resolve().parent.parent / "Complete Data"
@@ -35,33 +37,62 @@ MONTHLY_DIR = ROOT_DIR / "All_Monthly_Return_Data"
 # -----------------------------------------------------------------------------
 # 2) BUILD SSA HISTORY
 # -----------------------------------------------------------------------------
-def load_returns():
-    out = {}
-    for f in sorted(MONTHLY_DIR.glob("*_Monthly_Revenues.csv")):
-        tkr = f.stem.replace("_Monthly_Revenues", "")
-        df  = pd.read_csv(f)
+def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
+    """
+    Loads all “*_Monthly_Revenues.csv” files from root_dir,
+    parses year/month → datetime, coerces returns to numeric,
+    and returns a dict ticker → pd.Series indexed by date.
+    """
+    out: dict[str, pd.Series] = {}
+    for path in sorted(root_dir.glob("*_Monthly_Revenues.csv")):
+        ticker = path.stem.replace("_Monthly_Revenues", "")
+        df = pd.read_csv(path)
+
+        # build a proper datetime index
         df['date'] = pd.to_datetime(df[['year','month']].assign(day=1))
+
+        # coerce the return column
         df['return'] = pd.to_numeric(df['return'], errors='coerce')
-        out[tkr] = df.set_index('date')['return'].sort_index()
+
+        # extract a Series indexed by date
+        series = df.set_index('date')['return'].sort_index()
+
+        out[ticker] = series
+
     return out
 
-def compute_ssa(x):
-    N = len(x)
-    if N < SSA_WINDOW: return np.nan
-    K = N - SSA_WINDOW + 1
-    X = np.column_stack([x[i:i+SSA_WINDOW] for i in range(K)])
-    S = X @ X.T
-    vals, vecs = np.linalg.eigh(S)
-    idx = np.argsort(vals)[::-1]
-    U = vecs[:,idx[:SSA_COMPS]] * np.sqrt(vals[idx[:SSA_COMPS]])
-    V = (X.T @ vecs[:,idx[:SSA_COMPS]]) / np.sqrt(vals[idx[:SSA_COMPS]])
+# -----------------------------------------------------------------------------
+# 2) ROBUST SSA HELPERS
+# -----------------------------------------------------------------------------
+def robust_low_rank(X, q, max_iter=25, eps=1e-7):
+    U0, s0, V0t = la.svd(X, full_matrices=False)
+    U = U0[:, :q] * np.sqrt(s0[:q])
+    V = (V0t[:q, :].T) * np.sqrt(s0[:q])
+    for _ in range(max_iter):
+        R = X - U @ V.T
+        W = 1.0 / (np.abs(R) + eps)
+        Xw = np.sqrt(W) * X
+        Uw, sw, Vwt = la.svd(Xw, full_matrices=False)
+        U = Uw[:, :q] * np.sqrt(sw[:q])
+        V = (Vwt[:q, :].T) * np.sqrt(sw[:q])
+    return U, V
+
+def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
+    N = len(series)
+    if N < L:
+        return np.nan
+    K = N - L + 1
+    X = np.column_stack([series[i:i+L] for i in range(K)])
+    U, V = robust_low_rank(X, q)
     Xr = U @ V.T
-    rec = np.zeros(N); cnt = np.zeros(N)
-    for i in range(SSA_WINDOW):
+    rec = np.zeros(N)
+    cnt = np.zeros(N)
+    for i in range(L):
         for j in range(K):
-            rec[i+j] += Xr[i,j]
+            rec[i+j] += Xr[i, j]
             cnt[i+j] += 1
-    return (rec/cnt)[-SSA_WINDOW:].mean()
+    rec /= cnt
+    return rec[-L:].mean()
 
 def build_ssa_history(returns):
     start = (START_DATE + relativedelta(years=LOOKBACK_YEARS)).replace(day=1)
@@ -72,7 +103,7 @@ def build_ssa_history(returns):
         lb0 = dt - relativedelta(years=LOOKBACK_YEARS)
         lb1 = dt - relativedelta(months=1)
         for tkr, series in returns.items():
-            ssa_df.at[dt, tkr] = compute_ssa(series.loc[lb0:lb1].values)
+            ssa_df.at[dt, tkr] = compute_rlssa(series.loc[lb0:lb1].values, L=SSA_WINDOW, q=SSA_COMPS)
     return ssa_df
 
 # -----------------------------------------------------------------------------
@@ -103,8 +134,12 @@ def find_contract(tkr, y, m):
 # -----------------------------------------------------------------------------
 # 4) PREP & SSA TABLE
 # -----------------------------------------------------------------------------
-returns   = load_returns()
-ssa_score = build_ssa_history(returns)
+base = Path().resolve().parent.parent / "Complete Data"
+
+log_returns    = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
+returns = load_monthly_returns(base / "All_Monthly_Return_Data")
+
+ssa_score = build_ssa_history(log_returns)
 print(ssa_score)
 tickers   = list(returns)
 
@@ -155,19 +190,43 @@ while cur <= FINAL_END:
         print(pd.DataFrame(raw, columns=['Tkr','SSA','Z','P']).set_index('Tkr'))
 
     # 5) select signals
-    longs  = sorted([r for r in raw if r[2] > 0 and r[3] <= SIG_LEVEL], key=lambda x: x[3])
-    shorts = sorted([r for r in raw if r[2] < 0 and r[3] <= SIG_LEVEL], key=lambda x: x[3])
+    sigL = sorted([r for r in raw if r[1] > 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1], reverse=True)
+    sigS = sorted([r for r in raw if r[1] < 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1])
+
+    # the “rest” sorted by score
+    restL = sorted([r for r in raw if r not in sigL], key=lambda x: x[1], reverse=True)
+    restS = sorted([r for r in raw if r not in sigS], key=lambda x: x[1])
+
     picks = []
+
     if MODE == "Long":
-        if not (STRICT_SEL and len(longs) < NUM_SELECT):
-            picks = [t for t,_,_,_ in longs[:NUM_SELECT]]
+        # if strict and not enough signals, nothing
+        if STRICT_SEL and len(sigL) < NUM_SELECT:
+            picks = []
+        else:
+            # take up to NUM_SELECT from the sigL (if any), then pad from restL
+            pool = sigL + restL
+            picks = [t for t, _, _, _ in pool[:NUM_SELECT]]
+
     elif MODE == "Short":
-        if not (STRICT_SEL and len(shorts) < NUM_SELECT):
-            picks = [f"-{t}" for t,_,_,_ in shorts[:NUM_SELECT]]
-    else:
-        half = NUM_SELECT//2
-        if not (STRICT_SEL and (len(longs)<half or len(shorts)<half)):
-            picks = [t for t,_,_,_ in longs[:half]] + [f"-{t}" for t,_,_,_ in shorts[:half]]
+        if STRICT_SEL and len(sigS) < NUM_SELECT:
+            picks = []
+        else:
+            pool = sigS + restS
+            picks = [f"-{t}" for t, _, _, _ in pool[:NUM_SELECT]]
+
+    else:  # LongShort
+        half = NUM_SELECT // 2
+        longs_enough = len(sigL) >= half
+        shorts_enough = len(sigS) >= half
+        if STRICT_SEL and not (longs_enough and shorts_enough):
+            picks = []
+        else:
+            longs_pool = sigL + restL
+            shorts_pool = sigS + restS
+            longs_pick = [t for t, _, _, _ in longs_pool[:half]]
+            shorts_pick = [f"-{t}" for t, _, _, _ in shorts_pool[:half]]
+            picks = longs_pick + shorts_pick
 
     # 6) fetch contracts & record
     daily, contrib = {}, []
@@ -177,7 +236,7 @@ while cur <= FINAL_END:
         _, mdf = find_contract(tkr, cur.year, cur.month)
         daily[sig] = mdf
         r = returns[tkr].get(datetime(cur.year, cur.month, 1), np.nan)
-        w = (-r if sig.startswith('-') else r)/n
+        w = (1/(1+r)-1 if sig.startswith('-') else r)/n
         comb += w
         contrib.append(f"{sig}:{r:.2%}→{w:.2%}")
 
@@ -201,22 +260,32 @@ hist_df = pd.DataFrame([{
     'combined_ret': rec['combined']
 } for rec in records])
 
+
+pd.set_option('display.precision', 20)
 print(hist_df.to_string(index=False))
+
+tot_return = 1
+for r in hist_df['combined_ret']:
+    tot_return *= (1 + r)
+print(f"\nTotal return for {len(records)} months: {tot_return-1:.2%}")
 
 # -----------------------------------------------------------------------------
 # 6) PERFORMANCE & PLOT (no costs when not trading)
 # -----------------------------------------------------------------------------
 vc_nc = vc_wc = START_VALUE
-dates, nc, wc = [], [], []
-
+dates, nc, wc, overall_return, cur_return = [], [], [], [], []
+Overall_Return = 1.0
 for rec in records:
+    #Overall_Return = 1
     fc = rec['forecast']
-    if not (PLOT_START <= fc <= PLOT_END): continue
+    if not (PLOT_START <= fc <= PLOT_END):
+        print(f"Forcast: {fc}")
+        continue
 
     daily = rec['daily_dfs']
     if not daily:
-        d = (fc - relativedelta(months=1)) + pd.offsets.MonthEnd(0)
-        dates += [d,d]; nc += [vc_nc,vc_nc]; wc += [vc_wc,vc_wc]
+        d = (fc) + pd.offsets.MonthEnd(0)
+        dates += [d]; nc += [vc_nc]; wc += [vc_wc]; overall_return += [Overall_Return]; cur_return += [0.0]
     else:
         vc_wc *= (1 - ENTRY_COST)
         all_df = pd.concat([mdf.assign(signal=s) for s,mdf in daily.items()])\
@@ -227,39 +296,69 @@ for rec in records:
             for r in grp.itertuples():
                 sig = r.signal
                 prev = prevs[sig]
-                ret  = (r.close/r.open-1) if prev is None else (r.close/prev-1)
-                if sig.startswith('-'): ret = -ret
-                rs += ret/len(daily)
-                prevs[sig] = r.close
-            vc_nc *= (1+rs); vc_wc *= (1+rs)
-            dates.append(d); nc.append(vc_nc); wc.append(vc_wc)
-        vc_wc *= (1 - EXIT_COST)
+                close = r.close
+                # first bar: use open→close
+                if prev is None:
+                    open_ = r.open
+                    if sig.startswith('-'):
+                        # short: entry price is the open, exit is close
+                        ret = open_ / close - 1
+                    else:
+                        # long
+                        ret = close / open_ - 1
+                else:
+                    # subsequent bars: prev is last-close
+                    if sig.startswith('-'):
+                        # short: profit = prev / close - 1
+                        ret = prev / close - 1
+                    else:
+                        # long: profit = close / prev - 1
+                        ret = close / prev - 1
 
-perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc})\
+                rs += ret / len(daily)
+                prevs[sig] = close
+
+            # now compound
+            vc_nc *= (1 + rs)
+            vc_wc *= (1 + rs)
+            Overall_Return *= (1 + rs)
+            dates.append(d)
+            nc.append(vc_nc)
+            wc.append(vc_wc)
+            overall_return.append(Overall_Return)
+            cur_return.append(rs)
+
+print(len(dates), len(nc), len(wc), len(overall_return), len(cur_return))
+
+perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc, 'Tot_Return': overall_return, 'cur_return': cur_return})\
            .set_index('Date')
+#perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc})\
+#           .set_index('Date')
 
-initial_val = perf['NoCosts'].iloc[0]
+#print(perf.to_string(index=True))
+
 final_nc    = perf['NoCosts'].iloc[-1]
 final_wc    = perf['WithCosts'].iloc[-1]
-tot_nc      = (final_nc/initial_val - 1)*100
-tot_wc      = (final_wc/initial_val - 1)*100
+tot_nc      = (final_nc/START_VALUE - 1)*100
+tot_wc      = (final_wc/START_VALUE - 1)*100
 
-title_str = f"SSA_{MODE}_Portfolio_{NUM_SELECT}_Assets_&_Lookback_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}.png"
-output_dir = Path("plots/SSA_Plots")
+print(tot_nc)
+
+title_str = f"RLSSA_{MODE}_Portfolio_{NUM_SELECT}_A_&_LB_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}_SS_{STRICT_SEL}.png"
+output_dir = Path("plots/RLSSA_Plots")
 output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
-plt.plot(perf.index, perf['NoCosts'],
-         label=f'No Costs (Total: {tot_nc:.2f}%)')
-plt.plot(perf.index, perf['WithCosts'],
-         label=f'With Costs (Total: {tot_wc:.2f}%)')
-plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
-plt.title(f'SSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL}')
-plt.legend(); plt.grid(True)
+plt.plot(perf.index, perf['NoCosts'],  label=f'No Costs (Total: {tot_nc:.2f}%)')
+plt.plot(perf.index, perf['WithCosts'],label=f'With Costs (Total: {tot_wc:.2f}%)')
+plt.xlabel('Date')
+plt.ylabel('Portfolio Value (CHF)')
+plt.title(f'RLSSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL} & SS {STRICT_SEL}')
+plt.legend()
+plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
 #plt.show()
 
 save_path = output_dir / title_str
 plt.savefig(save_path, dpi=300)
-

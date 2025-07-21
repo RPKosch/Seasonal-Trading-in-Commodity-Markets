@@ -1,6 +1,7 @@
 # File: Data Analysis/Compute_Monthly_Returns.py
 
 import math
+import re
 import pandas as pd
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
@@ -9,8 +10,6 @@ from datetime import date, datetime, timedelta
 # -----------------------------------------------------------------------------
 # === CONFIGURATION ===
 # -----------------------------------------------------------------------------
-# If True, compute log returns and write to "All_Monthly_Log_Return_Data"
-# otherwise compute simple returns and write to "All_Monthly_Return_Data"
 USE_LOG_RETURNS = True
 
 TICKERS         = ["CC", "CF", "CO", "CP", "CT", "ZW", "GD", "HE", "HO",
@@ -19,7 +18,6 @@ START_YEAR      = 2001
 START_MONTH     = 1
 END_YEAR        = 2025
 END_MONTH       = 4
-MIN_DAYS_AFTER  = 3   # require contract to trade at least this many days past month end
 
 # -----------------------------------------------------------------------------
 def month_iterator(start_year, start_month, end_year, end_month):
@@ -30,40 +28,53 @@ def month_iterator(start_year, start_month, end_year, end_month):
         yield current.year, current.month
         current -= relativedelta(months=1)
 
-def find_contract_file(data_root: Path, ticker: str, year: int, month: int) -> Path | None:
-    """Pick first nearby contract that covers the month and trades MIN_DAYS_AFTER days past."""
-    month_start = date(year, month, 1)
-    month_end   = month_start + relativedelta(months=1) - timedelta(days=1)
-    for offset in (2, 3, 4, 5, 6):
-        cdt   = month_start + relativedelta(months=offset)
-        fname = f"{ticker}_{cdt.year:04d}-{cdt.month:02d}.csv"
-        p     = data_root / fname
-        if not p.exists():
+def find_contract(tkr: str, y: int, m: int, root: Path):
+    """
+    Scan TICKER_Historic_Data directory for the front‐month contract:
+    pick the file with smallest (year*12+month) lag ≥ 2 that still
+    trades through month-end+15 days and has at least one trade in-month.
+    Returns (ticker, filtered_dataframe) or (None, None).
+    """
+    m0   = datetime(y, m, 1)
+    mend = m0 + relativedelta(months=1) - timedelta(days=1)
+    pat  = re.compile(rf"^{tkr}[_-](\d{{4}})-(\d{{2}})\.csv$")
+    cands = []
+    folder = root / f"{tkr}_Historic_Data"
+    for p in folder.iterdir():
+        mm = pat.match(p.name)
+        if not mm:
+            continue
+        fy, fm = map(int, mm.groups())
+        lag = (fy - y) * 12 + (fm - m)
+        if lag < 2:
             continue
         df = pd.read_csv(p, parse_dates=["Date"])
-        dates = df["Date"].dt.date
-        if dates.min() > month_start:
+        if df.Date.max() < mend + timedelta(days=15):
             continue
-        if dates.max() < (month_end + timedelta(days=MIN_DAYS_AFTER)):
+        mdf = df[(df.Date >= m0) & (df.Date <= mend)]
+        if mdf.empty:
             continue
-        return p
-    return None
+        cands.append((lag, mdf.sort_values("Date")))
+    if not cands:
+        return None, None
+    # pick the closest front‐month
+    _, best = min(cands, key=lambda x: x[0])
+    return tkr, best
 
-def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int) -> dict | None:
-    """Compute either simple or log return for the chosen contract over the month."""
-    contract_file = find_contract_file(data_root, ticker, year, month)
-    if contract_file is None:
+def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int):
+    """Compute simple or log return over the calendar month from front‐month contract."""
+    tkr, mdf = find_contract(ticker, year, month, data_root)
+    if mdf is None:
         return None
 
-    df = pd.read_csv(contract_file, parse_dates=["Date"])
     start_dt = pd.Timestamp(year, month, 1)
     end_dt   = start_dt + relativedelta(months=1) - pd.Timedelta(days=1)
-    mdf = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
-    if mdf.empty:
+    in_month = mdf[(mdf["Date"] >= start_dt) & (mdf["Date"] <= end_dt)]
+    if in_month.empty:
         return None
 
-    first_open = mdf.iloc[0]["open"]
-    last_close = mdf.iloc[-1]["close"]
+    first_open = in_month.iloc[0]["open"]
+    last_close = in_month.iloc[-1]["close"]
 
     if USE_LOG_RETURNS:
         ret = math.log(last_close / first_open)
@@ -75,10 +86,10 @@ def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int
         "year":        year,
         "month":       month,
         "return":      ret,
-        "contract":    contract_file.stem,
-        "start_date":  mdf.iloc[0]["Date"].strftime("%Y-%m-%d"),
+        "contract":    f"{ticker}_{year:04d}-{month:02d}",
+        "start_date":  in_month.iloc[0]["Date"].strftime("%Y-%m-%d"),
         "start_value": first_open,
-        "end_date":    mdf.iloc[-1]["Date"].strftime("%Y-%m-%d"),
+        "end_date":    in_month.iloc[-1]["Date"].strftime("%Y-%m-%d"),
         "end_value":   last_close,
     }
 
@@ -91,8 +102,8 @@ def main():
 
     for ticker in TICKERS:
         print(f"\n=== Processing {ticker} ===")
-        hist_root = data_root / f"{ticker}_Historic_Data"
-        records   = []
+        records = []
+        hist_root = data_root  # find_contract uses data_root / f"{ticker}_Historic_Data"
 
         for yr, mo in month_iterator(START_YEAR, START_MONTH, END_YEAR, END_MONTH):
             res = compute_return_for_month(hist_root, ticker, yr, mo)

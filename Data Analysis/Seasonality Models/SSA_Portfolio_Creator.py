@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from scipy.stats import norm
 
 # -----------------------------------------------------------------------------
 # 1) PARAMETERS
@@ -14,18 +15,19 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
+NUM_SELECT      = 2
+STRICT_SEL      = True
+MODE            = "LongShort"   # "Long", "Short", or "LongShort"
+SIG_LEVEL       = 0.05
+
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
-SIG_LEVEL       = 0.05
-NUM_SELECT      = 1
-STRICT_SEL      = True
-MODE            = "Short"   # "Long", "Short", or "LongShort"
 
 ENTRY_COST      = EXIT_COST = 0.0025
 START_VALUE     = 1000.0
 PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
-DEBUG_DATE      = datetime(2016, 8, 1)
+DEBUG_DATE      = datetime(2016, 1, 1)
 
 # Data paths
 ROOT_DIR    = Path().resolve().parent.parent / "Complete Data"
@@ -34,14 +36,28 @@ MONTHLY_DIR = ROOT_DIR / "All_Monthly_Return_Data"
 # -----------------------------------------------------------------------------
 # 2) BUILD SSA HISTORY
 # -----------------------------------------------------------------------------
-def load_returns():
-    out = {}
-    for f in sorted(MONTHLY_DIR.glob("*_Monthly_Revenues.csv")):
-        tkr = f.stem.replace("_Monthly_Revenues", "")
-        df  = pd.read_csv(f)
+def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
+    """
+    Loads all “*_Monthly_Revenues.csv” files from root_dir,
+    parses year/month → datetime, coerces returns to numeric,
+    and returns a dict ticker → pd.Series indexed by date.
+    """
+    out: dict[str, pd.Series] = {}
+    for path in sorted(root_dir.glob("*_Monthly_Revenues.csv")):
+        ticker = path.stem.replace("_Monthly_Revenues", "")
+        df = pd.read_csv(path)
+
+        # build a proper datetime index
         df['date'] = pd.to_datetime(df[['year','month']].assign(day=1))
+
+        # coerce the return column
         df['return'] = pd.to_numeric(df['return'], errors='coerce')
-        out[tkr] = df.set_index('date')['return'].sort_index()
+
+        # extract a Series indexed by date
+        series = df.set_index('date')['return'].sort_index()
+
+        out[ticker] = series
+
     return out
 
 def compute_ssa(x):
@@ -102,8 +118,12 @@ def find_contract(tkr, y, m):
 # -----------------------------------------------------------------------------
 # 4) PREP & SSA TABLE
 # -----------------------------------------------------------------------------
-returns   = load_returns()
-ssa_score = build_ssa_history(returns)
+base = Path().resolve().parent.parent / "Complete Data"
+
+log_returns    = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
+returns = load_monthly_returns(base / "All_Monthly_Return_Data")
+
+ssa_score = build_ssa_history(log_returns)
 print(ssa_score)
 tickers   = list(returns)
 
@@ -115,9 +135,8 @@ first_trade_forecast = (initial_lb_end
                         + relativedelta(years=CALIB_YEARS))
 
 # -----------------------------------------------------------------------------
-# 5) MAIN LOOP (pick by raw SSA)
+# 5) MAIN LOOP (using only ssa_score & calibration slice)
 # -----------------------------------------------------------------------------
-
 records = []
 cur     = initial_lb_end + pd.offsets.MonthBegin(0)
 
@@ -126,47 +145,90 @@ while cur <= FINAL_END:
         cur += relativedelta(months=1)
         continue
 
-    # 1) current robust‑SSA vector
-    current = ssa_score.loc[cur]
+    # 1) get current SSA vector
+    current_ssa = ssa_score.loc[cur]
 
-    # 2) build raw list of (ticker, score)
-    raw = [(t, float(current[t])) for t in tickers if not np.isnan(current[t])]
+    # 2) slice calibration block
+    cal_start = cur - relativedelta(years=CALIB_YEARS)
+    cal_end   = cur - relativedelta(months=1)
+    calib_block = ssa_score.loc[cal_start:cal_end]
+
+    # 3) compute mean & std per ticker
+    means = calib_block.mean()
+    stds  = calib_block.std(ddof=1)
+
+    # 4) compute raw list with z & p-values
+    raw = []
+    for t in tickers:
+        sc = current_ssa[t]
+        if np.isnan(sc) or stds[t] <= 0:
+            continue
+        z = (sc - means[t]) / stds[t]
+        p = 2*(1 - norm.cdf(abs(z)))
+        raw.append((t, sc, z, p))
 
     # debug
     if cur == DEBUG_DATE:
-        print(f"[DEBUG] Raw SSA scores @ {DEBUG_DATE.date()}:\n",
-              pd.DataFrame(raw, columns=['Tkr','SSA']).set_index('Tkr'))
+        print(f"[DEBUG] SSA/P on {DEBUG_DATE.date()}:")
+        print(calib_block)
+        print(pd.DataFrame(raw, columns=['Tkr','SSA','Z','P']).set_index('Tkr'))
 
-    # 3) sort for longs & shorts
-    longs  = sorted(raw, key=lambda x: x[1], reverse=True)   # highest scores
-    shorts = sorted(raw, key=lambda x: x[1])                # most negative
+    # 5) select signals
+    sigL = sorted([r for r in raw if r[1] > 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1], reverse=True)
+    sigS = sorted([r for r in raw if r[1] < 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1])
 
-    # 4) pick signals
+    # the “rest” sorted by score
+    restL = sorted([r for r in raw if r not in sigL], key=lambda x: x[1], reverse=True)
+    restS = sorted([r for r in raw if r not in sigS], key=lambda x: x[1])
+
     picks = []
+
     if MODE == "Long":
-        picks = [t for t,_ in longs[:NUM_SELECT]]
+        # if strict and not enough signals, nothing
+        if STRICT_SEL and len(sigL) < NUM_SELECT:
+            picks = []
+        else:
+            # take up to NUM_SELECT from the sigL (if any), then pad from restL
+            pool = sigL + restL
+            picks = [t for t, _, _, _ in pool[:NUM_SELECT]]
+
     elif MODE == "Short":
-        picks = [f"-{t}" for t,_ in shorts[:NUM_SELECT]]
+        if STRICT_SEL and len(sigS) < NUM_SELECT:
+            picks = []
+        else:
+            pool = sigS + restS
+            picks = [f"-{t}" for t, _, _, _ in pool[:NUM_SELECT]]
+
     else:  # LongShort
         half = NUM_SELECT // 2
-        picks = [t for t,_ in longs[:half]] + [f"-{t}" for t,_ in shorts[:half]]
+        longs_enough = len(sigL) >= half
+        shorts_enough = len(sigS) >= half
+        if STRICT_SEL and not (longs_enough and shorts_enough):
+            picks = []
+        else:
+            longs_pool = sigL + restL
+            shorts_pool = sigS + restS
+            longs_pick = [t for t, _, _, _ in longs_pool[:half]]
+            shorts_pick = [f"-{t}" for t, _, _, _ in shorts_pool[:half]]
+            picks = longs_pick + shorts_pick
 
-    # 5) fetch contracts & record
+    # 6) fetch contracts & record
     daily, contrib = {}, []
     comb = 0.0; n = max(1, len(picks))
     for sig in picks:
-        tkr, mdf = find_contract(sig.lstrip('-'), cur.year, cur.month)
+        tkr = sig.lstrip('-')
+        _, mdf = find_contract(tkr, cur.year, cur.month)
         daily[sig] = mdf
         r = returns[tkr].get(datetime(cur.year, cur.month, 1), np.nan)
-        w = (-r if sig.startswith('-') else r) / n
+        w = (1/(1+r)-1 if sig.startswith('-') else r)/n
         comb += w
         contrib.append(f"{sig}:{r:.2%}→{w:.2%}")
 
     records.append({
-        'forecast':  cur,
-        'signals':   picks,
-        'contribs':  contrib,
-        'combined':  comb,
+        'forecast': cur,
+        'signals':  picks,
+        'contribs': contrib,
+        'combined': comb,
         'daily_dfs': daily
     })
 
@@ -182,22 +244,30 @@ hist_df = pd.DataFrame([{
     'combined_ret': rec['combined']
 } for rec in records])
 
+pd.set_option('display.precision', 20)
 print(hist_df.to_string(index=False))
+
+tot_return = 1
+for r in hist_df['combined_ret']:
+    tot_return *= (1 + r)
+print(f"\nTotal return for {len(records)} months: {tot_return-1:.2%}")
 
 # -----------------------------------------------------------------------------
 # 6) PERFORMANCE & PLOT (no costs when not trading)
 # -----------------------------------------------------------------------------
 vc_nc = vc_wc = START_VALUE
-dates, nc, wc = [], [], []
-
+dates, nc, wc, overall_return, cur_return = [], [], [], [], []
+Overall_Return = 1.0
 for rec in records:
     fc = rec['forecast']
-    if not (PLOT_START <= fc <= PLOT_END): continue
+    if not (PLOT_START <= fc <= PLOT_END):
+        print(f"Forcast: {fc}")
+        continue
 
     daily = rec['daily_dfs']
     if not daily:
-        d = (fc - relativedelta(months=1)) + pd.offsets.MonthEnd(0)
-        dates += [d,d]; nc += [vc_nc,vc_nc]; wc += [vc_wc,vc_wc]
+        d = (fc) + pd.offsets.MonthEnd(0)
+        dates += [d]; nc += [vc_nc]; wc += [vc_wc]; overall_return += [Overall_Return]; cur_return += [0.0]
     else:
         vc_wc *= (1 - ENTRY_COST)
         all_df = pd.concat([mdf.assign(signal=s) for s,mdf in daily.items()])\
@@ -208,32 +278,68 @@ for rec in records:
             for r in grp.itertuples():
                 sig = r.signal
                 prev = prevs[sig]
-                ret  = (r.close/r.open-1) if prev is None else (r.close/prev-1)
-                if sig.startswith('-'): ret = -ret
-                rs += ret/len(daily)
-                prevs[sig] = r.close
-            vc_nc *= (1+rs); vc_wc *= (1+rs)
-            dates.append(d); nc.append(vc_nc); wc.append(vc_wc)
-        vc_wc *= (1 - EXIT_COST)
+                close = r.close
+                # first bar: use open→close
+                if prev is None:
+                    open_ = r.open
+                    if sig.startswith('-'):
+                        # short: entry price is the open, exit is close
+                        ret = open_ / close - 1
+                    else:
+                        # long
+                        ret = close / open_ - 1
+                else:
+                    # subsequent bars: prev is last-close
+                    if sig.startswith('-'):
+                        # short: profit = prev / close - 1
+                        ret = prev / close - 1
+                    else:
+                        # long: profit = close / prev - 1
+                        ret = close / prev - 1
 
-perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc})\
+                rs += ret / len(daily)
+                prevs[sig] = close
+
+            # now compound
+            vc_nc *= (1 + rs)
+            vc_wc *= (1 + rs)
+            Overall_Return *= (1 + rs)
+            dates.append(d)
+            nc.append(vc_nc)
+            wc.append(vc_wc)
+            overall_return.append(Overall_Return)
+            cur_return.append(rs)
+
+print(len(dates), len(nc), len(wc), len(overall_return), len(cur_return))
+
+perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc, 'Tot_Return': overall_return, 'cur_return': cur_return})\
            .set_index('Date')
 
-initial_val = perf['NoCosts'].iloc[0]
+#print(perf.to_string(index=True))
+
 final_nc    = perf['NoCosts'].iloc[-1]
 final_wc    = perf['WithCosts'].iloc[-1]
-tot_nc      = (final_nc/initial_val - 1)*100
-tot_wc      = (final_wc/initial_val - 1)*100
+tot_nc      = (final_nc/START_VALUE - 1)*100
+tot_wc      = (final_wc/START_VALUE - 1)*100
+
+print(tot_nc)
+
+title_str = f"SSA_{MODE}_Portfolio_{NUM_SELECT}_A_&_LB_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}_SS_{STRICT_SEL}.png"
+output_dir = Path("plots/SSA_Plots")
+output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
-         label=f'No Costs (Total: {tot_nc:.2f}%)')
+         label=f'No Costs (Total: {tot_nc:.8f}%)')
 plt.plot(perf.index, perf['WithCosts'],
-         label=f'With Costs (Total: {tot_wc:.2f}%)')
+         label=f'With Costs (Total: {tot_wc:.8f}%)')
 plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
-plt.title(f'SSA {MODE} Portfolio (p≤{SIG_LEVEL})')
+plt.title(f'SSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL} & SS {STRICT_SEL}')
 plt.legend(); plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-plt.show()
+#plt.show()
+
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
 
