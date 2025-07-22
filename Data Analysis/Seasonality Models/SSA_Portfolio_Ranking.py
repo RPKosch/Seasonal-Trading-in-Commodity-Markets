@@ -193,21 +193,11 @@ def compute_cum(rankings, direction='long'):
         rows.append({'rank': float(r), 'cum_ret': total})
     return pd.DataFrame(rows).set_index('rank'), holdings
 
-
-# then call:
-long_cum, long_hold   = compute_cum(long_rank,  'long')
-short_cum, short_hold = compute_cum(short_rank, 'short')
-
-pd.set_option('display.precision', 30)
-
-print("\nLong cumulative by rank:\n", long_cum)
-print("\nShort cumulative by rank:\n", short_cum)
-
 # -----------------------------------------------------------------------------
 # Calculate cumulative returns for all ranks
 # -----------------------------------------------------------------------------
-long_cum_df, _   = compute_cum(long_rankings,  direction='long')
-short_cum_df, _  = compute_cum(short_rankings, direction='short')
+long_cum_df, _   = compute_cum(long_rank,  direction='long')
+short_cum_df, _  = compute_cum(short_rank, direction='short')
 
 # -----------------------------------------------------------------------------
 # Print the top‑17 long portfolios

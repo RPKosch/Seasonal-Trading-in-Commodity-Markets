@@ -13,10 +13,11 @@ from decimal import Decimal, getcontext
 START_YEAR, START_MONTH = 2001, 1
 FINAL_END       = datetime(2024, 12, 31)
 LOOKBACK_YEARS  = 10
-SIG_LEVEL       = 1
+SIG_LEVEL       = 0.05
 START_VALUE     = 1000.0
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
+DEBUG_DAY = datetime(2011, 1, 1)
 
 # -----------------------------------------------------------------------------
 # 2) DATE RANGES
@@ -127,6 +128,13 @@ while cur <= FINAL_END:
               ))
         X   = sm.add_constant(df['D'])
         res = sm.OLS(df['rtn'], X).fit(cov_type='HAC', cov_kwds={'maxlags':1})
+
+        if DEBUG_DAY == cur:
+            print(df)
+            coef_D = res.params['D']
+            pval_D = res.pvalues['D']
+            print(f"{t}: coef(D) = {coef_D:.4f}, p-value = {pval_D:.4f}, avr = {df.loc[df.month==m,'rtn'].mean()}, avrall = {df.loc[df.month==m,'rtn']}, overall = {df['rtn'].mean()})")
+
         stats.append({
             'ticker': t,
             'beta': res.params['D'],
@@ -145,6 +153,7 @@ while cur <= FINAL_END:
 
     # Long ranking
     sigL = dfm[(dfm.pval<=SIG_LEVEL)&(dfm.beta>0)&(dfm.avg>0)]
+    #sigL = dfm[(dfm.pval <= SIG_LEVEL) & (dfm.avg > 0)]
     restL= dfm.drop(sigL.index,errors='ignore')
     orderL = list(sigL.sort_values('avg',ascending=False).index) \
            + list(restL.sort_values('avg',ascending=False).index)
@@ -153,60 +162,35 @@ while cur <= FINAL_END:
 
     # Short ranking
     sigS = dfm[(dfm.pval<=SIG_LEVEL)&(dfm.beta<0)&(dfm.avg<0)]
+    #sigS = dfm[(dfm.pval <= SIG_LEVEL) & (dfm.avg < 0)]
     restS= dfm.drop(sigS.index,errors='ignore')
     orderS = list(sigS.sort_values('avg',ascending=True).index) \
            + list(restS.sort_values('avg',ascending=True).index)
     orderS += [t for t in tickers if t not in orderS]
     short_rankings[cur]=orderS
 
-    # Capture the model object for the best long & short
-    bestL = orderL[0]
-    bestS = orderS[0]
-    models_long[cur]  = dfm.loc[bestL,'model']
-    models_short[cur] = dfm.loc[bestS,'model']
+    if DEBUG_DAY == cur:
+        print(orderL)
+        print(orderL[0])
+        print(orderS)
+        print(orderS[0])
 
     cur += relativedelta(months=1)
 
 # -----------------------------------------------------------------------------
 # 7) PRINT MONTHLY SELECTION + FULL RANKINGS + REGRESSION SUMMARIES
 # -----------------------------------------------------------------------------
-for dt in sorted(models_long.keys()):
-    bl = long_rankings[dt][0]
-    bs = short_rankings[dt][0]
-
-    rL = simple_rets[bl].get(dt, np.nan)
-    rS = simple_rets[bs].get(dt, np.nan)
-
-    #print(f"\n=== {dt.date()} ===")
-    #print(f"Best Long : {bl}  return {rL:.2%}")
-    #print("Long Ranking with returns:")
-    for rank, tkr in enumerate(long_rankings[dt], start=1):
-        rtn = simple_rets[tkr].get(dt, np.nan)
-        if rank == 1:
-            #print(f"  {dt.date()}. {tkr:4s} → {rtn:.2%}")
-            print(f"{rtn:.4%}")
-    #print(models_long[dt].summary())
-
-    #print(f"\nBest Short: {bs}  return {rS:.2%}")
-    #print("Short Ranking with returns:")
-    for rank, tkr in enumerate(short_rankings[dt], start=1):
-        rtn = simple_rets[tkr].get(dt, np.nan)
-        # invert sign to show the effective P&L direction
-        rtn_display = 1/(1+rtn)-1 if not np.isnan(rtn) else np.nan
-        #print(f"  {rank:2d}. {tkr:4s} → {rtn_display:.2%}")
-        #print(models_short[dt].summary())
-
-# -----------------------------------------------------------------------------
-# Calculate cumulative returns for all ranks
-# -----------------------------------------------------------------------------
+print(long_rankings)
+print("lol")
 long_cum_df, _   = compute_cum(long_rankings,  direction='long')
+print(long_cum_df)
 short_cum_df, _  = compute_cum(short_rankings, direction='short')
 
 # -----------------------------------------------------------------------------
 # Print the top‑17 long portfolios
 # -----------------------------------------------------------------------------
 print("\nCumulative returns for LONG portfolios (ranks 1–17):")
-for rank in range(1, 17):
+for rank in range(1, 18):
     cum = long_cum_df.loc[rank, 'cum_ret']
     print(f" Rank {rank:2d}: {cum:.2%}")
 
@@ -214,7 +198,7 @@ for rank in range(1, 17):
 # Print the top‑17 short portfolios
 # -----------------------------------------------------------------------------
 print("\nCumulative returns for SHORT portfolios (ranks 1–17):")
-for rank in range(1, 17):
+for rank in range(1, 18):
     cum = short_cum_df.loc[rank, 'cum_ret']
     print(f" Rank {rank:2d}: {cum:.2%}")
 

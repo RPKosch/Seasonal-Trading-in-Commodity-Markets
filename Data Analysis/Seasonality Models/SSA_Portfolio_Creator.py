@@ -16,9 +16,9 @@ CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
 NUM_SELECT      = 2
-STRICT_SEL      = True
+STRICT_SEL      = False
 MODE            = "LongShort"   # "Long", "Short", or "LongShort"
-SIG_LEVEL       = 0.05
+SIG_LEVEL       = 1
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
@@ -330,9 +330,9 @@ output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],
-         label=f'No Costs (Total: {tot_nc:.8f}%)')
+         label=f'No Costs (Total: {tot_nc:.2f}%)')
 plt.plot(perf.index, perf['WithCosts'],
-         label=f'With Costs (Total: {tot_wc:.8f}%)')
+         label=f'With Costs (Total: {tot_wc:.2f}%)')
 plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
 plt.title(f'SSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL} & SS {STRICT_SEL}')
 plt.legend(); plt.grid(True)

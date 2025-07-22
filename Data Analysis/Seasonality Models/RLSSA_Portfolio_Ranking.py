@@ -20,6 +20,8 @@ SSA_WINDOW      = 12
 SSA_COMPS       = 2
 SIG_LEVEL       = 0.05
 
+DEBUG_DAY       = datetime(2023, 7, 1)
+
 PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
 START_VALUE     = 1000.0
@@ -118,7 +120,7 @@ ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
 log_rets = load_monthly_returns(ROOT_DIR/"All_Monthly_Log_Return_Data")
 simple_rets = load_monthly_returns(ROOT_DIR/"All_Monthly_Return_Data")
 ssa_score = build_ssa_history(log_rets)
-print(ssa_score)
+#print(ssa_score.to_string())
 tickers = list(log_rets)
 NUM_T = len(tickers)
 
@@ -130,6 +132,8 @@ cur = FIRST_TRADE
 while cur <= SSA_END:
     block = ssa_score.loc[cur - relativedelta(years=CALIB_YEARS):
                           cur - relativedelta(months=1)]
+    if DEBUG_DAY == cur:
+        print(f"{cur}: {block}")
     mu, sd = block.mean(), block.std(ddof=1)
     raw = []
     for t in tickers:
@@ -162,13 +166,16 @@ while cur <= SSA_END:
         key=lambda x: x[1]
     )
 
-    print(df)
-
     # build full ordered lists of tickers
     ordL = [t for t,_,_,_ in longs] + [t for t,_,_,_ in restL]
     ordS = [t for t,_,_,_ in shorts] + [t for t,_,_,_ in restS]
-    print(ordS)
 
+    if DEBUG_DAY == cur:
+        print("------------------------------------------------")
+        print(ordL)
+        print(ordL[0])
+        print(ordS)
+        print(ordS[0])
 
     long_rank[cur]  = ordL
     short_rank[cur] = ordS

@@ -17,9 +17,9 @@ CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
 NUM_SELECT      = 2
-STRICT_SEL      = False
+STRICT_SEL      = True
 MODE            = "LongShort" # "Long", "Short", or "LongShort"
-SIG_LEVEL       = 1
+SIG_LEVEL       = 0.05
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2

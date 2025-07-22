@@ -10,8 +10,8 @@ L                   = 12    # SSA window length
 q                   = 2     # Number of L1‐robust components
 K_SELECT            = 2     # How many tickers to long/short
 # Define analysis window by year & month:
-START_YEAR, START_MONTH             = 2001, 1
-FINAL_END_YEAR, FINAL_END_MONTH     = 2010, 12
+START_YEAR, START_MONTH             = 2004, 6
+FINAL_END_YEAR, FINAL_END_MONTH     = 2014, 5
 # Lookback in years (None => full history)
 LOOKBACK_YEARS      = None
 
@@ -57,7 +57,7 @@ def rlssa_score(series: pd.Series, L: int, q: int):
 
 # --- Gather assets ---
 project_root = Path().resolve().parent.parent
-monthly_dir  = project_root / "Complete Data" / "All_Monthly_Return_Data"
+monthly_dir  = project_root / "Complete Data" / "All_Monthly_Log_Return_Data"
 paths        = list(monthly_dir.glob("*_Monthly_Revenues.csv"))
 ASSET_LIST   = [p.stem.replace("_Monthly_Revenues","") for p in paths]
 
@@ -71,6 +71,7 @@ for ticker in ASSET_LIST:
 
     # restrict to our analysis window
     df = df.loc[start_date:final_end]
+    print(df)
 
     # apply lookback if requested
     if LOOKBACK_YEARS is not None:

@@ -6,7 +6,7 @@ from dateutil.relativedelta import relativedelta
 # ----------------------------
 # User settings
 # ----------------------------
-end_date       = "2024-11-20"
+end_date       = "2010-12-20"
 LOOKBACK_YEARS = 10
 SIGN_LEVEL     = 1
 
@@ -48,7 +48,7 @@ for tkr, series in returns.items():
     obs_count   = len(s)
     first_date  = s.index.min().date()
     last_date   = s.index.max().date()
-    mean_return = s.mean()
+    mean_return = s[s.index.month == next_month].mean()
     std_return  = s.std(ddof=1)
 
     # dummy regression for next_month
