@@ -10,10 +10,10 @@ L                   = 12    # SSA window length
 q                   = 2     # Number of L1‐robust components
 K_SELECT            = 2     # How many tickers to long/short
 # Define analysis window by year & month:
-START_YEAR, START_MONTH             = 2004, 6
-FINAL_END_YEAR, FINAL_END_MONTH     = 2014, 5
+START_YEAR, START_MONTH             = 2001, 1
+FINAL_END_YEAR, FINAL_END_MONTH     = 2015, 12
 # Lookback in years (None => full history)
-LOOKBACK_YEARS      = None
+LOOKBACK_YEARS      = 10
 
 # --- Date endpoints ---
 start_date = datetime(START_YEAR, START_MONTH, 1)

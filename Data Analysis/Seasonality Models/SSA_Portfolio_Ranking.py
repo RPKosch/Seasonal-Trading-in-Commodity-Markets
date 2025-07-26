@@ -1,37 +1,48 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from scipy.stats import norm
 from decimal import Decimal, getcontext
+import scipy.linalg as la
 
 # -----------------------------------------------------------------------------
 # 1) PARAMETERS & WINDOWS
 # -----------------------------------------------------------------------------
-START_DATE      = datetime(2001, 1, 1)
-LOOKBACK_YEARS  = 10   # only used to build SSA history
-CALIB_YEARS     = 5
-FINAL_END       = datetime(2024, 12, 31)
-DEBUG_MONTH     = datetime(2023,7,1)  # e.g., datetime(2023,7,1) to activate detailed prints
+START_DATE       = datetime(2001, 1, 1)
+LOOKBACK_YEARS   = 10     # for building SSA history
+ZCALIB_YEARS     = 5      # 5 yrs for Z‑score calibration
+SIM_YEARS        = 5      # 5 yrs for the actual simulation
+FINAL_END        = datetime(2024,12,31)
+DEBUG_MONTH      = None   # e.g. datetime(2023,7,1)
 
-SSA_WINDOW      = 12
-SSA_COMPS       = 2
-SIG_LEVEL       = 0.05
-
-PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
-START_VALUE     = 1000.0
+SSA_WINDOW       = 12
+SSA_COMPS        = 2
+SIG_LEVEL        = 0.05
+START_VALUE      = 1000.0
 
 # -----------------------------------------------------------------------------
 # 2) DERIVE DATE RANGES
 # -----------------------------------------------------------------------------
-SSA_START = (START_DATE + relativedelta(years=LOOKBACK_YEARS)).replace(day=1)
-SSA_END   = FINAL_END.replace(day=1)
-INITIAL_SSA_END = (START_DATE + relativedelta(years=LOOKBACK_YEARS) - pd.offsets.MonthEnd(1))
-FIRST_TRADE     = INITIAL_SSA_END + pd.offsets.MonthBegin(1) + relativedelta(years=CALIB_YEARS)
+SSA_START        = (START_DATE + relativedelta(years=LOOKBACK_YEARS))
+SSA_END          = FINAL_END
 
-print(f"SSA history: {SSA_START.date()} → {SSA_END.date()}")
-print(f"First trade : {FIRST_TRADE.date()}")
+# Z‑score calibration: 2011-01 → 2016-12
+ZCALIB_START     = START_DATE + relativedelta(years=LOOKBACK_YEARS)
+ZCALIB_END       = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS)- pd.offsets.MonthEnd(1)
+
+# Testing/simulation: 2017-01 → 2021-12
+TEST_SIM_START        = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS)
+TEST_SIM_END          = TEST_SIM_START + relativedelta(years=SIM_YEARS) - pd.offsets.MonthEnd(1)
+
+FINAL_SIM_START        = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS) + relativedelta(years=SIM_YEARS)
+FINAL_SIM_END          = FINAL_END
+
+print(f"SSA history   : {SSA_START.date()} → {SSA_END.date()}")
+print(f"Z‑calibration : {ZCALIB_START.date()} → {ZCALIB_END.date()}")
+print(f"Test Simulation    : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
+print(f"Final Simulation    : {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
 
 # -----------------------------------------------------------------------------
 # 3) HELPERS
@@ -80,51 +91,86 @@ def build_ssa_history(returns: dict[str,pd.Series]) -> pd.DataFrame:
 
 def sharpe_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
+    if arr.size == 0:
+        return np.nan
     mean, std = arr.mean(), arr.std(ddof=1)
-    return (mean/std * np.sqrt(12)) if std else np.nan
+    return mean/std * np.sqrt(12) if std else np.nan
 
 
 def sortino_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
-    mean = arr.mean()
+    if arr.size == 0:
+        return np.nan
     neg = arr[arr<0]
-    dstd = neg.std(ddof=1)
-    return (mean/dstd * np.sqrt(12)) if dstd else np.nan
+    if neg.size == 0:
+        return np.nan
+    return arr.mean() / neg.std(ddof=1) * np.sqrt(12)
 
 
 def calmar_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
+    if arr.size == 0:
+        return np.nan
     cum = np.cumprod(1 + arr)
     peak = np.maximum.accumulate(cum)
-    drawdown = cum/peak - 1
-    mdd = abs(drawdown.min())
+    dd = cum/peak - 1
+    mdd = abs(dd.min())
     years = len(arr)/12
-    cagr = cum[-1]**(1/years) - 1 if years>0 else np.nan
-    return (cagr/mdd) if mdd else np.nan
+    if mdd == 0 or years == 0:
+        return np.nan
+    cagr = cum[-1]**(1/years) - 1
+    return cagr / mdd
 
+def build_metrics(cum_df, rets_dict):
+    rows=[]
+    for prev_rank, cum_row in cum_df.iterrows():
+        rets = rets_dict[prev_rank]
+        sr, sor, cr = sharpe_ratio(rets), sortino_ratio(rets), calmar_ratio(rets)
+        cum = float(cum_row['cum_ret'])
+        score = gps_harmonic([cum, sr, sor, cr])
+        rows.append({
+            'prev_rank': prev_rank,
+            'cum_ret':   cum,
+            'sharpe':    sr,
+            'sortino':   sor,
+            'calmar':    cr,
+            'score':     score,
+        })
+    df = pd.DataFrame(rows).set_index('prev_rank')
+    df['new_rank']   = df['score'].rank(ascending=False, method='first')
+    df['rank_change']= df.index - df['new_rank']
+    return df.sort_index()
+
+# def gps_harmonic(scores: list[float]) -> float:
+#     vals = [s for s in scores if s and not np.isnan(s)]
+#     n = len(vals)
+#     return n/np.sum([1/s for s in vals]) if n else -999
 
 def gps_harmonic(scores: list[float]) -> float:
-    vals = [s for s in scores if s and not np.isnan(s)]
+    # keep only strictly positive, non‑NaN entries
+    vals = [s for s in scores if s > 0 and not np.isnan(s)]
     n = len(vals)
-    return (n / np.sum([1/s for s in vals])) if n else np.nan
+    if  n != 4:
+        return -999
+    return (n / sum(1.0/s for s in vals)) if n else -999
 
 # -----------------------------------------------------------------------------
 # 4) LOAD & PREP
 # -----------------------------------------------------------------------------
-ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
-log_rets = load_monthly_returns(ROOT_DIR/"All_Monthly_Log_Return_Data")
-simple_rets = load_monthly_returns(ROOT_DIR/"All_Monthly_Return_Data")
-ssa_score = build_ssa_history(log_rets)
-tickers = list(log_rets)
-NUM_T = len(tickers)
+ROOT_DIR     = Path().resolve().parent.parent / "Complete Data"
+log_rets     = load_monthly_returns(ROOT_DIR / "All_Monthly_Log_Return_Data")
+simple_rets  = load_monthly_returns(ROOT_DIR / "All_Monthly_Return_Data")
+ssa_score    = build_ssa_history(log_rets)
+tickers      = list(log_rets)
+NUM_T        = len(tickers)
 
 # -----------------------------------------------------------------------------
-# 5) RANK LONG & SHORT EACH MONTH (with optional DEBUG_MONTH)
+# 5) RANK LONG & SHORT EACH MONTH
 # -----------------------------------------------------------------------------
 long_rank, short_rank = {}, {}
-cur = FIRST_TRADE
+cur = TEST_SIM_START
 while cur <= SSA_END:
-    block = ssa_score.loc[cur - relativedelta(years=CALIB_YEARS):cur - relativedelta(months=1)]
+    block = ssa_score.loc[cur - relativedelta(years=ZCALIB_YEARS):cur - relativedelta(months=1)]
     mu, sd = block.mean(), block.std(ddof=1)
     raw = []
     for t in tickers:
@@ -132,82 +178,129 @@ while cur <= SSA_END:
         if pd.isna(sc) or sd[t] == 0:
             continue
         z = (sc - mu[t]) / sd[t]
-        p = 2*(1 - norm.cdf(abs(z)))
+        p = 2 * (1 - norm.cdf(abs(z)))
         raw.append((t, sc, z, p))
     df = pd.DataFrame(raw, columns=['tkr','ssa','z','p']).set_index('tkr')
 
-    # select & rank signals
-    longs  = sorted([r for r in raw if r[1] > 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1], reverse=True)
-    shorts = sorted([r for r in raw if r[1] < 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1])
-    restL  = sorted([r for r in raw if r not in longs], key=lambda x: x[1], reverse=True)
-    restS  = sorted([r for r in raw if r not in shorts], key=lambda x: x[1])
+    longs  = sorted(
+        [r for r in raw if r[1]>0 and r[3]<=SIG_LEVEL],
+        key=lambda x: x[1], reverse=True
+    )
+    shorts = sorted(
+        [r for r in raw if r[1]<0 and r[3]<=SIG_LEVEL],
+        key=lambda x: x[1]
+    )
+    restL  = sorted(
+        [r for r in raw if r not in longs],
+        key=lambda x: x[1], reverse=True
+    )
+    restS  = sorted(
+        [r for r in raw if r not in shorts],
+        key=lambda x: x[1]
+    )
 
     ordL = [t for t,_,_,_ in longs] + [t for t,_,_,_ in restL] + [t for t in tickers if t not in df.index]
     ordS = [t for t,_,_,_ in shorts] + [t for t,_,_,_ in restS] + [t for t in tickers if t not in df.index]
 
-    # Debug print if activated for this month
-    if DEBUG_MONTH is not None and cur == DEBUG_MONTH:
+    if DEBUG_MONTH and cur == DEBUG_MONTH:
         print(f"--- DEBUG {cur.date()} ---")
-        print("SSA block (calibration window):", block)
-        print("Signal DataFrame:", df)
-        print("Long picks order:", ordL)
-        print("Short picks order:", ordS)
-        print("----------------------------")
+        print("Calibration block (SSA):", block)
+        print(df)
+        print("Long order:", ordL)
+        print("Short order:", ordS)
+        print("----------------------")
 
     long_rank[cur]  = ordL
     short_rank[cur] = ordS
     cur += relativedelta(months=1)
 
 # -----------------------------------------------------------------------------
-# 6) COMPUTE CUMULATIVE RETURNS & METRICS & METRICS
+# 6) CALIBRATION & HOLDOUT COMPUTATIONS
 # -----------------------------------------------------------------------------
-def compute_cum_and_rets(rankings, direction='long'):
-    holdings, rets = ({r:{} for r in range(1,NUM_T+1)}, {r:[] for r in range(1,NUM_T+1)})
+def compute_cum_and_rets(rankings, direction='long', start_date=None, end_date=None):
+    holdings = {r:{} for r in range(1,NUM_T+1)}
+    rets     = {r:[] for r in range(1,NUM_T+1)}
     for dt, order in rankings.items():
-        if not (PLOT_START <= dt <= PLOT_END): continue
+        if start_date and dt<start_date: continue
+        if end_date   and dt>end_date:   continue
         for r, t in enumerate(order, start=1):
             holdings[r][dt] = t
             x = Decimal(str(simple_rets[t].get(dt,0.0)))
-            if direction=='short': x = Decimal(1)/(Decimal(1)+x)-Decimal(1)
+            if direction=='short':
+                x = Decimal(1)/(Decimal(1)+x) - Decimal(1)
             rets[r].append(x)
     rows=[]
     START_D = Decimal(str(START_VALUE))
     for r in range(1,NUM_T+1):
         v = START_D
-        for x in rets[r]: v *= (Decimal(1)+x)
-        rows.append({'rank':float(r),'cum_ret':v/START_D-Decimal(1)})
+        for x in rets[r]:
+            v *= (Decimal(1)+x)
+        rows.append({'rank':float(r),'cum_ret':v/START_D - Decimal(1)})
     return pd.DataFrame(rows).set_index('rank'), holdings, rets
 
-long_cum_df, long_hold, long_rets = compute_cum_and_rets(long_rank, 'long')
-short_cum_df, short_hold, short_rets = compute_cum_and_rets(short_rank, 'short')
+# Calibration/test period
+calib_long_cum, _, calib_long_rets = compute_cum_and_rets(
+    long_rank, 'long', TEST_SIM_START, TEST_SIM_END
+)
+metrics_long_calib = build_metrics(calib_long_cum, calib_long_rets)
+
+calib_short_cum, _, calib_short_rets = compute_cum_and_rets(
+    short_rank, 'short', TEST_SIM_START, TEST_SIM_END
+)
+metrics_short_calib = build_metrics(calib_short_cum, calib_short_rets)
+
+# Holdout with original SSA ordering
+holdout_long_cum, _, _  = compute_cum_and_rets(
+    long_rank, 'long', FINAL_SIM_START, FINAL_SIM_END
+)
+holdout_short_cum, _, _ = compute_cum_and_rets(
+    short_rank,'short', FINAL_SIM_START, FINAL_SIM_END
+)
 
 # -----------------------------------------------------------------------------
-# 7) BUILD & PRINT RESULTS
+# 7) OUTPUT & COMPARISON
 # -----------------------------------------------------------------------------
-def build_metrics(cum_df, rets_dict):
+print(f"Testing Portfolios for Period {TEST_SIM_START} until {TEST_SIM_END}")
+
+print("\nMetrics for LONG portfolios (ranks 1–17):")
+print(metrics_long_calib.loc[1:17].to_string())
+print("\nMetrics for SHORT portfolios (ranks 1–17):")
+print(metrics_short_calib.loc[1:17].to_string())
+print("-------------------------------------------------------------------------------------------------")
+
+print(f"Final Portfolios for Period {FINAL_SIM_START} until {FINAL_SIM_END}")
+print("\nMetrics for LONG portfolios (ranks 1–17):")
+print(holdout_long_cum.loc[1:17].to_string())
+print("\nMetrics for SHORT portfolios (ranks 1–17):")
+print(holdout_short_cum.loc[1:17].to_string())
+
+def output_comparison(metrics_calib, orig_cum):
+    print(f"\nTesting Period: {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
+    print(f"Final Simulation: {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
     rows=[]
-    for pr, row in cum_df.iterrows():
-        rets = rets_dict[pr]
-        sr = sharpe_ratio(rets)
-        sor = sortino_ratio(rets)
-        cr = calmar_ratio(rets)
-        cum = float(row['cum_ret'])
-        sc = gps_harmonic([cum, sr, sor, cr])
-        rows.append({'prev_rank':pr,'cum_ret':cum,'sharpe':sr,'sortino':sor,'calmar':cr,'score':sc})
-    df = pd.DataFrame(rows).set_index('prev_rank')
-    df['new_rank'] = df['score'].rank(ascending=False,method='first')
-    df['rank_change'] = df.index - df['new_rank']
-    return df.sort_index()
+    for prev_rank, row in metrics_calib.iterrows():
+        pr = int(prev_rank)
+        nr = (row['new_rank'])
+        new_ret = float(orig_cum.loc[pr, 'cum_ret'])
+        orig_ret  = float(orig_cum.loc[nr, 'cum_ret'])
+        orig_score = float(row['score'])
+        diff = new_ret - orig_ret
+        rows.append({
+            'prev_rank': pr,
+            'new_rank' : nr,
+            'holdout_ret_now': new_ret,
+            'holdout_ret_same_rank_prev' : orig_ret,
+            'difference'       : diff,
+            'score'            :  orig_score
+        })
+    return pd.DataFrame(rows).set_index('new_rank').sort_index()
 
-metrics_long = build_metrics(long_cum_df, long_rets)
-metrics_short= build_metrics(short_cum_df, short_rets)
+print("\nLong SSA comparison:")
+print(output_comparison(
+    metrics_long_calib,
+    holdout_long_cum).to_string())
 
-print("\nCumulative returns for LONG portfolios (ranks 1–17):")
-for rank in range(1,18):
-    print(f" Rank {rank:2d}: {long_cum_df.loc[rank,'cum_ret']:.2%}")
-print("\nCumulative returns for SHORT portfolios (ranks 1–17):")
-for rank in range(1,18):
-    print(f" Rank {rank:2d}: {short_cum_df.loc[rank,'cum_ret']:.2%}")
-
-print("\nMetrics for LONG (1–17):\n", metrics_long.loc[1:17].to_string())
-print("\nMetrics for SHORT (1–17):\n", metrics_short.loc[1:17].to_string())
+print("\nShort SSA comparison:")
+print(output_comparison(
+    metrics_short_calib,
+    holdout_short_cum).to_string())
