@@ -10,14 +10,18 @@ from datetime import date, datetime, timedelta
 # -----------------------------------------------------------------------------
 # === CONFIGURATION ===
 # -----------------------------------------------------------------------------
-USE_LOG_RETURNS = True
+USE_LOG_RETURNS   = True
+VOLUME_THRESHOLD  = 1000  # min in-month volume required for a contract to be usable
+
+LOST_TICKERS = ["PA", "PL"]
 
 TICKERS         = ["CC", "CF", "CO", "CP", "CT", "ZW", "GD", "HE", "HO",
-                   "LE", "NG", "PA", "PL", "ZS", "SU", "SV", "ZC"]
+                   "LE", "NG", "ZS", "SU", "SV", "ZC"]
 START_YEAR      = 2001
 START_MONTH     = 1
 END_YEAR        = 2025
 END_MONTH       = 4
+
 
 # -----------------------------------------------------------------------------
 def month_iterator(start_year, start_month, end_year, end_month):
@@ -30,40 +34,93 @@ def month_iterator(start_year, start_month, end_year, end_month):
 
 def find_contract(tkr: str, y: int, m: int, root: Path):
     """
-    Scan TICKER_Historic_Data directory for the front‐month contract:
-    pick the file with smallest (year*12+month) lag ≥ 2 that still
-    trades through month-end+15 days and has at least one trade in-month.
-    Returns (ticker, filtered_dataframe) or (None, None).
+    Scan TICKER_Historic_Data directory for the front-month contract:
+    pick the file with smallest (year*12+month) lag ≥ 2 that
+      • trades through month-end + 15 days,
+      • has at least one trade within the month, and
+      • has volume ≥ VOLUME_THRESHOLD on BOTH the first and last
+        available trading dates within that month.
+    Returns (ticker, filtered_dataframe, filename) or (None, None, None).
     """
     m0   = datetime(y, m, 1)
     mend = m0 + relativedelta(months=1) - timedelta(days=1)
     pat  = re.compile(rf"^{tkr}[_-](\d{{4}})-(\d{{2}})\.csv$")
     cands = []
     folder = root / f"{tkr}_Historic_Data"
+
+    earliest_first_date = None  # for diagnostics if everything starts after the month
+
     for p in folder.iterdir():
+        if not p.is_file():
+            continue
         mm = pat.match(p.name)
         if not mm:
             continue
+
         fy, fm = map(int, mm.groups())
         lag = (fy - y) * 12 + (fm - m)
         if lag < 2:
             continue
+
         df = pd.read_csv(p, parse_dates=["Date"])
-        if df.Date.max() < mend + timedelta(days=15):
+
+        # Track earliest "first date" among matched files (for error message)
+        if not df.empty:
+            fmin = df["Date"].min()
+            if earliest_first_date is None or fmin < earliest_first_date:
+                earliest_first_date = fmin
+
+        # Must trade through month-end + 15 days
+        if df["Date"].max() < mend + timedelta(days=15):
             continue
-        mdf = df[(df.Date >= m0) & (df.Date <= mend)]
+
+        # In-month slice
+        mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
         if mdf.empty:
             continue
-        cands.append((lag, mdf.sort_values("Date")))
+
+        # Sort to get first/last trading dates within the month
+        mdf = mdf.sort_values("Date")
+
+        # Endpoint volume checks
+        if "volume" not in mdf.columns:
+            # No volume column -> unusable
+            print(f"  • rejected {y}-{m:02d} {tkr} file {p.name}: no 'volume' column.")
+            continue
+
+        vol_series = pd.to_numeric(mdf["volume"], errors="coerce")
+        avg_vol = float(vol_series.mean(skipna=True))  # average in-month volume
+        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
+            # print(
+            #     f"  • rejected {y}-{m:02d} {tkr} file {p.name}: "
+            #     f"avg volume {avg_vol:.0f} < threshold {VOLUME_THRESHOLD}."
+            # )
+            continue
+
+        # Candidate accepted
+        cands.append((lag, mdf, p.name, avg_vol))
+
     if not cands:
-        return None, None
-    # pick the closest front‐month
-    _, best = min(cands, key=lambda x: x[0])
-    return tkr, best
+        if earliest_first_date is not None and earliest_first_date > mend:
+            print(
+                f"  ✖ {y}-{m:02d} {tkr}: No usable contract — "
+                f"earliest file starts {earliest_first_date.date()} > month-end {mend.date()}."
+            )
+        else:
+            print(
+                f"  ✖ {y}-{m:02d} {tkr}: No contract met criteria "
+                f"(lag≥2, trades through {(mend + timedelta(days=15)).date()}, "
+                f"in-month data, endpoint volume≥{VOLUME_THRESHOLD})."
+            )
+        return None, None, None, None
+
+    # pick the closest acceptable front-month
+    _, best_df, best_name, avg_vol = min(cands, key=lambda x: x[0])
+    return tkr, best_df, best_name, avg_vol
 
 def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int):
     """Compute simple or log return over the calendar month from front‐month contract."""
-    tkr, mdf = find_contract(ticker, year, month, data_root)
+    tkr, mdf, src_name, avg_vol = find_contract(ticker, year, month, data_root)
     if mdf is None:
         return None
 
@@ -82,16 +139,19 @@ def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int
         ret = last_close / first_open - 1
 
     return {
-        "ticker":      ticker,
-        "year":        year,
-        "month":       month,
-        "return":      ret,
-        "contract":    f"{ticker}_{year:04d}-{month:02d}",
-        "start_date":  in_month.iloc[0]["Date"].strftime("%Y-%m-%d"),
-        "start_value": first_open,
-        "end_date":    in_month.iloc[-1]["Date"].strftime("%Y-%m-%d"),
-        "end_value":   last_close,
+        "ticker":        ticker,
+        "year":          year,
+        "month":         month,
+        "contract_file": src_name,
+        "avg_vol":       avg_vol,
+        "return":        ret,
+        #"contract":      f"{ticker}_{year:04d}-{month:02d}",
+        "start_date":    in_month.iloc[0]["Date"].strftime("%Y-%m-%d"),
+        "start_value":   first_open,
+        "end_date":      in_month.iloc[-1]["Date"].strftime("%Y-%m-%d"),
+        "end_value":     last_close,
     }
+
 
 def main():
     project_root = Path().resolve().parent.parent
