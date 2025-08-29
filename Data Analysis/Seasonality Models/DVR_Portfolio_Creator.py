@@ -19,14 +19,15 @@ FINAL_END       = datetime(2024, 12, 31)
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 EXIT_COST        = 0.0025
-LOOKBACK_YEARS   = 10       # or None for full history
+LOOKBACK_YEARS   = 10      # or None for full history
 NUM_SELECT       = 1
 STRICT_SEL       = True
-MODE             = "Short"   # "Long", "Short", or "LongShort"
+MODE             = "Long"   # "Long", "Short", or "LongShort"
 SIG_LEVEL        = 0.05
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
+VOLUME_THRESHOLD = 1000
 DEBUG = False
 DEBUG_DATE = datetime(2020, 5, 1) #+ pd.offsets.MonthEnd(0)
 
@@ -38,22 +39,79 @@ def find_contract(ticker: str, year: int, month: int):
     m0      = datetime(year, month, 1)
     mend    = m0 + relativedelta(months=1) - timedelta(days=1)
     pattern = re.compile(rf"^{ticker}[_-](\d{{4}})-(\d{{2}})\.csv$")
+
     candidates = []
-    for p in root.iterdir():
-        m = pattern.match(p.name)
-        if not m: continue
-        fy, fm = int(m.group(1)), int(m.group(2))
-        diff = (fy - year)*12 + (fm - month)
-        if diff < 2: continue
-        df = pd.read_csv(p, parse_dates=["Date"])
-        if df.Date.max() < mend + timedelta(days=15): continue
-        mdf = df[(df.Date>=m0)&(df.Date<=mend)]
-        if mdf.empty: continue
-        candidates.append((diff, mdf.sort_values("Date")))
-    if not candidates:
+    earliest_first_date = None
+
+    if not root.exists():
+        print(f"  ✖ {year}-{month:02d} {ticker}: directory not found: {root}")
         return None, None
-    _, mdf = min(candidates, key=lambda x: x[0])
-    return ticker, mdf
+
+    for p in root.iterdir():
+        if not p.is_file():
+            continue
+        mobj = pattern.match(p.name)
+        if not mobj:
+            continue
+
+        fy, fm = int(mobj.group(1)), int(mobj.group(2))
+        lag = (fy - year) * 12 + (fm - month)
+        if lag < 2:
+            continue
+
+        try:
+            df = pd.read_csv(p, parse_dates=["Date"])
+        except Exception as e:
+            print(f"  • skipped {p.name}: {e}")
+            continue
+
+        if not df.empty:
+            fmin = df["Date"].min()
+            if earliest_first_date is None or fmin < earliest_first_date:
+                earliest_first_date = fmin
+
+        # Must trade through month-end + 15 days
+        if df["Date"].max() < mend + timedelta(days=15):
+            continue
+
+        # In-month slice
+        mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
+        if mdf.empty:
+            continue
+
+        # Volume checks
+        if "volume" not in mdf.columns:
+            print(f"  • rejected {year}-{month:02d} {ticker} file {p.name}: no 'volume' column.")
+            continue
+
+        vol = pd.to_numeric(mdf["volume"], errors="coerce")
+        avg_vol = float(vol.mean(skipna=True))
+        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
+            # Uncomment if you want verbose reason:
+            # print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: avg vol {avg_vol:.0f} < {VOLUME_THRESHOLD}.")
+            continue
+
+        # Candidate accepted (sort by date for consistent first/last rows)
+        candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
+
+    if not candidates:
+        if earliest_first_date is not None and earliest_first_date > mend:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No usable contract — "
+                f"earliest file starts {earliest_first_date.date()} > month-end {mend.date()}."
+            )
+        else:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No contract met criteria "
+                f"(lag≥2, trades through {(mend + timedelta(days=15)).date()}, "
+                f"in-month data, avg volume≥{VOLUME_THRESHOLD})."
+            )
+        return None, None
+
+    # Pick the closest acceptable front-month
+    _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
+    return ticker, best_mdf
+
 
 # -----------------------------------------------------------------------------
 # 4) LOAD RETURNS
@@ -345,7 +403,7 @@ plt.legend()
 plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-plt.show()
+#plt.show()
 
-#save_path = output_dir / title_str
-#plt.savefig(save_path, dpi=300)
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)

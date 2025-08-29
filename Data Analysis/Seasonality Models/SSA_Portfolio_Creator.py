@@ -15,9 +15,9 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 2
+NUM_SELECT      = 1
 STRICT_SEL      = False
-MODE            = "LongShort"   # "Long", "Short", or "LongShort"
+MODE            = "Short"   # "Long", "Short", or "LongShort"
 SIG_LEVEL       = 1
 
 SSA_WINDOW      = 12
@@ -27,6 +27,7 @@ ENTRY_COST      = EXIT_COST = 0.0025
 START_VALUE     = 1000.0
 PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
+VOLUME_THRESHOLD = 1000
 DEBUG_DATE      = datetime(2016, 1, 1)
 
 # Data paths
@@ -60,23 +61,92 @@ def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
 
     return out
 
-def compute_ssa(x):
+def compute_ssa(x: np.ndarray) -> float:
+    """
+    Basic SSA on a 1D series x of length N using globals:
+      SSA_WINDOW = L (1 < L < N), SSA_COMPS = r (number of leading components)
+    Returns the SSA one-step forecast \hat{x}_{N+1} based on the grouped reconstruction
+    using the first r eigentriples, as in Golyandina & Korobeynikov (2012).
+
+    If inputs are insufficient or numerically ill-posed, returns np.nan.
+    """
+    x = np.asarray(x, dtype=float).ravel()
     N = len(x)
-    if N < SSA_WINDOW: return np.nan
-    K = N - SSA_WINDOW + 1
-    X = np.column_stack([x[i:i+SSA_WINDOW] for i in range(K)])
-    S = X @ X.T
-    vals, vecs = np.linalg.eigh(S)
-    idx = np.argsort(vals)[::-1]
-    U = vecs[:,idx[:SSA_COMPS]] * np.sqrt(vals[idx[:SSA_COMPS]])
-    V = (X.T @ vecs[:,idx[:SSA_COMPS]]) / np.sqrt(vals[idx[:SSA_COMPS]])
-    Xr = U @ V.T
-    rec = np.zeros(N); cnt = np.zeros(N)
-    for i in range(SSA_WINDOW):
+    L = int(SSA_WINDOW)
+    r = int(SSA_COMPS)
+
+    # basic guards
+    if N < max(L, 3) or L <= 1 or L >= N or r < 1:
+        return np.nan
+    if np.isnan(x).any():
+        # SSA assumes a contiguous series; handle imputation upstream if needed
+        return np.nan
+
+    K = N - L + 1
+
+    # 1) Embedding (trajectory matrix, Hankel)
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # shape L x K
+
+    # 2) Decomposition via eigen of S = X X^T
+    S = X @ X.T                                        # L x L, symmetric psd
+    eigvals, eigvecs = np.linalg.eigh(S)               # ascending order
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    # keep only positive, non-negligible singular values
+    eps = 1e-12
+    pos = eigvals > eps
+    if not np.any(pos):
+        return np.nan
+    eigvals = eigvals[pos]
+    eigvecs = eigvecs[:, pos]
+
+    r_eff = int(min(r, eigvals.size))                  # selected components
+    U = eigvecs[:, :r_eff]                             # L x r
+    sigma = np.sqrt(eigvals[:r_eff])                   # r
+
+    # Right singular vectors V = X^T U / sigma
+    V = (X.T @ U) / sigma                              # K x r  (broadcast)
+
+    # 3) Reconstruct grouped X_r = sum sigma_i U_i V_i^T
+    # Scale columns of U by sigma, then multiply by V^T
+    Xr = (U * sigma) @ V.T                             # L x K
+
+    # 4) Diagonal averaging (Hankelization) -> length-N reconstructed series
+    rec = np.zeros(N, dtype=float)
+    cnt = np.zeros(N, dtype=float)
+    # Anti-diagonals: indices s = i + j with i in [0..L-1], j in [0..K-1]
+    for i in range(L):
         for j in range(K):
-            rec[i+j] += Xr[i,j]
-            cnt[i+j] += 1
-    return (rec/cnt)[-SSA_WINDOW:].mean()
+            rec[i + j] += Xr[i, j]
+            cnt[i + j] += 1.0
+    valid = cnt > 0
+    if not np.all(valid):
+        return np.nan
+    rec /= cnt
+
+    # 5) Recurrent SSA one-step forecast using selected eigenvectors
+    #    P_i = U_i, split into head (first L-1) and last coord pi_i
+    P_head = U[:-1, :]                 # (L-1) x r
+    pi = U[-1, :]                      # r
+    nu2 = float(np.dot(pi, pi))        # sum pi_i^2
+
+    # guard: (1 - nu^2) must not be ~0
+    if 1.0 - nu2 <= 1e-10:
+        return np.nan
+
+    # R = (a_{L-1}, ..., a_1)^T = (1/(1 - nu^2)) * sum_i pi_i * P_i_head
+    # which is matrix-vector product P_head @ pi
+    R = (P_head @ pi) / (1.0 - nu2)    # length L-1
+    a = R[::-1]                        # (a_1, ..., a_{L-1})
+
+    # one-step forecast: \hat x_{N+1} = sum_{j=1}^{L-1} a_j * \tilde x_{N+1-j}
+    lags = rec[-1: -L: -1]             # [rec[N-1], rec[N-2], ..., rec[N-L+1]] length L-1
+    if lags.size != a.size:
+        return np.nan
+    x_hat_next = float(np.dot(a, lags))
+    return x_hat_next
 
 def build_ssa_history(returns):
     start = (START_DATE + relativedelta(years=LOOKBACK_YEARS)).replace(day=1)
@@ -89,31 +159,86 @@ def build_ssa_history(returns):
         for tkr, series in returns.items():
             ssa_df.at[dt, tkr] = compute_ssa(series.loc[lb0:lb1].values)
     return ssa_df
-
 # -----------------------------------------------------------------------------
 # 3) CONTRACT FINDER
 # -----------------------------------------------------------------------------
-def find_contract(tkr, y, m):
-    root = ROOT_DIR / f"{tkr}_Historic_Data"
-    m0   = datetime(y, m, 1)
-    mend = m0 + relativedelta(months=1) - timedelta(days=1)
-    pat  = re.compile(rf"^{tkr}[_-](\d{{4}})-(\d{{2}})\.csv$")
-    cands = []
-    for p in root.iterdir():
-        mm = pat.match(p.name)
-        if not mm: continue
-        fy, fm = map(int, mm.groups())
-        if (fy-y)*12 + (fm-m) < 2: continue
-        df = pd.read_csv(p, parse_dates=['Date'])
-        if df.Date.max() < mend + timedelta(days=15): continue
-        mdf = df[(df.Date>=m0)&(df.Date<=mend)]
-        if mdf.empty: continue
-        diff = (fy-y)*12 + (fm-m)
-        cands.append((diff, mdf.sort_values('Date')))
-    if not cands:
+def find_contract(ticker: str, year: int, month: int):
+    root    = Path().resolve().parent.parent / "Complete Data" / f"{ticker}_Historic_Data"
+    m0      = datetime(year, month, 1)
+    mend    = m0 + relativedelta(months=1) - timedelta(days=1)
+    pattern = re.compile(rf"^{ticker}[_-](\d{{4}})-(\d{{2}})\.csv$")
+
+    candidates = []
+    earliest_first_date = None
+
+    if not root.exists():
+        print(f"  ✖ {year}-{month:02d} {ticker}: directory not found: {root}")
         return None, None
-    _, mdf = min(cands, key=lambda x: x[0])
-    return tkr, mdf
+
+    for p in root.iterdir():
+        if not p.is_file():
+            continue
+        mobj = pattern.match(p.name)
+        if not mobj:
+            continue
+
+        fy, fm = int(mobj.group(1)), int(mobj.group(2))
+        lag = (fy - year) * 12 + (fm - month)
+        if lag < 2:
+            continue
+
+        try:
+            df = pd.read_csv(p, parse_dates=["Date"])
+        except Exception as e:
+            print(f"  • skipped {p.name}: {e}")
+            continue
+
+        if not df.empty:
+            fmin = df["Date"].min()
+            if earliest_first_date is None or fmin < earliest_first_date:
+                earliest_first_date = fmin
+
+        # Must trade through month-end + 15 days
+        if df["Date"].max() < mend + timedelta(days=15):
+            continue
+
+        # In-month slice
+        mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
+        if mdf.empty:
+            continue
+
+        # Volume checks
+        if "volume" not in mdf.columns:
+            print(f"  • rejected {year}-{month:02d} {ticker} file {p.name}: no 'volume' column.")
+            continue
+
+        vol = pd.to_numeric(mdf["volume"], errors="coerce")
+        avg_vol = float(vol.mean(skipna=True))
+        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
+            # Uncomment if you want verbose reason:
+            # print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: avg vol {avg_vol:.0f} < {VOLUME_THRESHOLD}.")
+            continue
+
+        # Candidate accepted (sort by date for consistent first/last rows)
+        candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
+
+    if not candidates:
+        if earliest_first_date is not None and earliest_first_date > mend:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No usable contract — "
+                f"earliest file starts {earliest_first_date.date()} > month-end {mend.date()}."
+            )
+        else:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No contract met criteria "
+                f"(lag≥2, trades through {(mend + timedelta(days=15)).date()}, "
+                f"in-month data, avg volume≥{VOLUME_THRESHOLD})."
+            )
+        return None, None
+
+    # Pick the closest acceptable front-month
+    _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
+    return ticker, best_mdf
 
 # -----------------------------------------------------------------------------
 # 4) PREP & SSA TABLE

@@ -16,10 +16,10 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 CALIB_YEARS     = 5
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 2
-STRICT_SEL      = True
-MODE            = "LongShort" # "Long", "Short", or "LongShort"
-SIG_LEVEL       = 0.05
+NUM_SELECT      = 1
+STRICT_SEL      = False
+MODE            = "Short" # "Long", "Short", or "LongShort"
+SIG_LEVEL       = 1
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
@@ -31,6 +31,7 @@ PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 DEBUG_DATE      = datetime(2016, 1, 1)
 
 # Data paths
+VOLUME_THRESHOLD = 1000
 ROOT_DIR    = Path().resolve().parent.parent / "Complete Data"
 MONTHLY_DIR = ROOT_DIR / "All_Monthly_Return_Data"
 
@@ -64,72 +65,198 @@ def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
 # -----------------------------------------------------------------------------
 # 2) ROBUST SSA HELPERS
 # -----------------------------------------------------------------------------
-def robust_low_rank(X, q, max_iter=25, eps=1e-7):
-    U0, s0, V0t = la.svd(X, full_matrices=False)
-    U = U0[:, :q] * np.sqrt(s0[:q])
-    V = (V0t[:q, :].T) * np.sqrt(s0[:q])
+def robust_low_rank(X: np.ndarray, q: int, max_iter: int = 25, eps: float = 1e-7):
+    """
+    Very simple IRLS-style robust low-rank approximation:
+      minimize ~ sum_{lk} w_{lk} (X_{lk} - (UV^T)_{lk})^2 with w_{lk} ≈ 1/(|resid|+eps).
+    Returns factors U (L×q), V (K×q) so that S ≈ U V^T.
+    """
+    # init with truncated SVD of X
+    U0, s0, V0t = np.linalg.svd(X, full_matrices=False)
+    r0 = min(q, s0.size)
+    U = U0[:, :r0] * np.sqrt(s0[:r0])
+    V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
+
     for _ in range(max_iter):
-        R = X - U @ V.T
-        W = 1.0 / (np.abs(R) + eps)
+        R = X - U @ V.T                         # residuals
+        W = 1.0 / (np.abs(R) + eps)            # L1-like weights (elementwise)
+        # weighted matrix (elementwise) for next SVD step
         Xw = np.sqrt(W) * X
-        Uw, sw, Vwt = la.svd(Xw, full_matrices=False)
-        U = Uw[:, :q] * np.sqrt(sw[:q])
-        V = (Vwt[:q, :].T) * np.sqrt(sw[:q])
+        Uw, sw, Vwt = np.linalg.svd(Xw, full_matrices=False)
+        r0 = min(q, sw.size)
+        # rescale back to unweighted factors (heuristic)
+        U = Uw[:, :r0] * np.sqrt(sw[:r0])
+        V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
+
     return U, V
 
+
 def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
-    N = len(series)
-    if N < L:
+    """
+    RLSSA one-step forecast following Kazemi & Rodrigues (2023) + SSA recurrence:
+      1) Build Hankel trajectory X (L×K)
+      2) Robust low-rank S ≈ U V^T (rank q)
+      3) Hankelize S → robust fitted series \tilde X (length N)
+      4) Classical SVD on S to get left singular vectors U_j
+      5) Compute RL coefficients \hat a and forecast \hat y_{N+1}
+
+    Returns scalar \hat y_{N+1}. np.nan on failure.
+    """
+    x = np.asarray(series, dtype=float).ravel()
+    if np.any(~np.isfinite(x)):
+        return np.nan
+
+    N = x.size
+    if not (1 < L < N) or q < 1:
         return np.nan
     K = N - L + 1
-    X = np.column_stack([series[i:i+L] for i in range(K)])
-    U, V = robust_low_rank(X, q)
-    Xr = U @ V.T
-    rec = np.zeros(N)
-    cnt = np.zeros(N)
+
+    # 1) Embedding (Hankel)
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # L×K
+
+    # 2) Robust decomposition: S ≈ U V^T (rank q)
+    U_r, V_r = robust_low_rank(X, q=q)
+    S = U_r @ V_r.T                                    # L×K robust "signal" matrix
+
+    # 3) Diagonal averaging (Hankelization) → \tilde X (length N)
+    rec = np.zeros(N, dtype=float)
+    cnt = np.zeros(N, dtype=float)
     for i in range(L):
         for j in range(K):
-            rec[i+j] += Xr[i, j]
-            cnt[i+j] += 1
-    rec /= cnt
-    return rec[-L:].mean()
+            rec[i + j] += S[i, j]
+            cnt[i + j] += 1.0
+    if not np.all(cnt > 0):
+        return np.nan
+    rec /= cnt   # \tilde x_1..N
 
-def build_ssa_history(returns):
+    # 4) Classical SVD on S to obtain left singular vectors for LRR coefficients
+    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)  # Uc: L×r_svd
+    r_eff = int(min(q, sc.size))                         # keep first r (same q)
+    if r_eff < 1:
+        return np.nan
+    Uc = Uc[:, :r_eff]
+
+    # Split each left singular vector into first L-1 entries and last entry
+    P_head = Uc[:-1, :]                      # (L-1)×r
+    phi    = Uc[-1, :]                       # length r
+    nu2    = float(np.dot(phi, phi))         # sum phi_j^2
+
+    if 1.0 - nu2 <= 1e-10:
+        return np.nan
+
+    # \hat a = (a_{L-1},...,a_1)^T = (1/(1-ν^2)) * sum_j φ_j * U_j^{triangle}
+    R = (P_head @ phi) / (1.0 - nu2)         # length L-1: (a_{L-1},...,a_1)
+    a = R[::-1]                              # (a_1,...,a_{L-1})
+
+    # 5) One-step forecast using the robust fitted tail (Step 4 relationship)
+    # use (\tilde x_N, ..., \tilde x_{N-L+2}) as regressors
+    lags = rec[-1: -L: -1]                   # length L-1
+    if lags.size != a.size:
+        return np.nan
+
+    y_hat_next = float(np.dot(a, lags))
+    return y_hat_next
+
+
+def build_rlssa_history(returns):
+    """
+    Same logic as your build_ssa_history, but calls compute_rlssa to store the
+    RLSSA **one-step forecast** available at each evaluation month.
+    """
     start = (START_DATE + relativedelta(years=LOOKBACK_YEARS)).replace(day=1)
     end   = FINAL_END.replace(day=1)
     dates = pd.date_range(start, end, freq='MS')
-    ssa_df = pd.DataFrame(index=dates, columns=returns.keys(), dtype=float)
+    rlssa_df = pd.DataFrame(index=dates, columns=returns.keys(), dtype=float)
+
     for dt in dates:
         lb0 = dt - relativedelta(years=LOOKBACK_YEARS)
         lb1 = dt - relativedelta(months=1)
         for tkr, series in returns.items():
-            ssa_df.at[dt, tkr] = compute_rlssa(series.loc[lb0:lb1].values, L=SSA_WINDOW, q=SSA_COMPS)
-    return ssa_df
+            window = series.loc[lb0:lb1].values
+            rlssa_df.at[dt, tkr] = compute_rlssa(window, L=SSA_WINDOW, q=SSA_COMPS)
+
+    return rlssa_df
 
 # -----------------------------------------------------------------------------
 # 3) CONTRACT FINDER
 # -----------------------------------------------------------------------------
-def find_contract(tkr, y, m):
-    root = ROOT_DIR / f"{tkr}_Historic_Data"
-    m0   = datetime(y, m, 1)
-    mend = m0 + relativedelta(months=1) - timedelta(days=1)
-    pat  = re.compile(rf"^{tkr}[_-](\d{{4}})-(\d{{2}})\.csv$")
-    cands = []
-    for p in root.iterdir():
-        mm = pat.match(p.name)
-        if not mm: continue
-        fy, fm = map(int, mm.groups())
-        if (fy-y)*12 + (fm-m) < 2: continue
-        df = pd.read_csv(p, parse_dates=['Date'])
-        if df.Date.max() < mend + timedelta(days=15): continue
-        mdf = df[(df.Date>=m0)&(df.Date<=mend)]
-        if mdf.empty: continue
-        diff = (fy-y)*12 + (fm-m)
-        cands.append((diff, mdf.sort_values('Date')))
-    if not cands:
+def find_contract(ticker: str, year: int, month: int):
+    root    = Path().resolve().parent.parent / "Complete Data" / f"{ticker}_Historic_Data"
+    m0      = datetime(year, month, 1)
+    mend    = m0 + relativedelta(months=1) - timedelta(days=1)
+    pattern = re.compile(rf"^{ticker}[_-](\d{{4}})-(\d{{2}})\.csv$")
+
+    candidates = []
+    earliest_first_date = None
+
+    if not root.exists():
+        print(f"  ✖ {year}-{month:02d} {ticker}: directory not found: {root}")
         return None, None
-    _, mdf = min(cands, key=lambda x: x[0])
-    return tkr, mdf
+
+    for p in root.iterdir():
+        if not p.is_file():
+            continue
+        mobj = pattern.match(p.name)
+        if not mobj:
+            continue
+
+        fy, fm = int(mobj.group(1)), int(mobj.group(2))
+        lag = (fy - year) * 12 + (fm - month)
+        if lag < 2:
+            continue
+
+        try:
+            df = pd.read_csv(p, parse_dates=["Date"])
+        except Exception as e:
+            print(f"  • skipped {p.name}: {e}")
+            continue
+
+        if not df.empty:
+            fmin = df["Date"].min()
+            if earliest_first_date is None or fmin < earliest_first_date:
+                earliest_first_date = fmin
+
+        # Must trade through month-end + 15 days
+        if df["Date"].max() < mend + timedelta(days=15):
+            continue
+
+        # In-month slice
+        mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
+        if mdf.empty:
+            continue
+
+        # Volume checks
+        if "volume" not in mdf.columns:
+            print(f"  • rejected {year}-{month:02d} {ticker} file {p.name}: no 'volume' column.")
+            continue
+
+        vol = pd.to_numeric(mdf["volume"], errors="coerce")
+        avg_vol = float(vol.mean(skipna=True))
+        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
+            # Uncomment if you want verbose reason:
+            # print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: avg vol {avg_vol:.0f} < {VOLUME_THRESHOLD}.")
+            continue
+
+        # Candidate accepted (sort by date for consistent first/last rows)
+        candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
+
+    if not candidates:
+        if earliest_first_date is not None and earliest_first_date > mend:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No usable contract — "
+                f"earliest file starts {earliest_first_date.date()} > month-end {mend.date()}."
+            )
+        else:
+            print(
+                f"  ✖ {year}-{month:02d} {ticker}: No contract met criteria "
+                f"(lag≥2, trades through {(mend + timedelta(days=15)).date()}, "
+                f"in-month data, avg volume≥{VOLUME_THRESHOLD})."
+            )
+        return None, None
+
+    # Pick the closest acceptable front-month
+    _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
+    return ticker, best_mdf
 
 # -----------------------------------------------------------------------------
 # 4) PREP & SSA TABLE
@@ -139,7 +266,7 @@ base = Path().resolve().parent.parent / "Complete Data"
 log_returns    = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
 returns = load_monthly_returns(base / "All_Monthly_Return_Data")
 
-ssa_score = build_ssa_history(log_returns)
+ssa_score = build_rlssa_history(log_returns)
 print(ssa_score)
 tickers   = list(returns)
 
