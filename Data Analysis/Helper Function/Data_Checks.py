@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import sys
 import math
 import argparse
@@ -16,8 +13,8 @@ import calendar
 from scipy import stats
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller, kpss
-from statsmodels.stats.diagnostic import het_breuschpagan, het_white, breaks_cusumolsresid
 from statsmodels.stats.outliers_influence import variance_inflation_factor, OLSInfluence
+from statsmodels.stats.diagnostic import het_breuschpagan, het_white, breaks_cusumolsresid, het_arch
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option("display.width", 140)
@@ -120,6 +117,21 @@ def load_and_normalize(fp: Path) -> pd.DataFrame:
     )
     df = df.sort_values(["ticker","date"]).reset_index(drop=True)
     return df
+
+def arch_lm_test(resid: np.ndarray, lags: int = 12) -> Dict[str, float]:
+    """
+    Engle's ARCH LM test on residuals. Small p-values indicate conditional heteroskedasticity
+    (volatility clustering). 'lags' is the number of ARCH lags to test; for monthly data 12 is sensible.
+    """
+    r = np.asarray(resid, dtype=float).ravel()
+    try:
+        lm, lm_p, fstat, f_p = het_arch(r, nlags=lags)
+        return dict(arch_lm=as_float(lm), arch_lm_p=as_float(lm_p),
+                    arch_f=as_float(fstat), arch_fp=as_float(f_p),
+                    arch_lags=int(lags))
+    except Exception as e:
+        return dict(arch_error=str(e))
+
 
 # ------------------------- tests & designs -------------------------
 
@@ -372,6 +384,7 @@ def analyze_ticker(df_t: pd.DataFrame, outdir: Path, ticker: str):
     # Heteroskedasticity & stability
     resid = model.resid
     het = bp_white_tests(resid, X)
+    arch = arch_lm_test(resid, lags=12)
     cus = cusum_test(resid, X)
 
     # Structural break (Chow)
@@ -443,21 +456,37 @@ def analyze_ticker(df_t: pd.DataFrame, outdir: Path, ticker: str):
     md.append("\n## Homoskedasticity (constant error variance)\n")
     md.append(f"- **Breusch–Pagan**: LM p = {het['bp_p']:.4f}, F p = {het['bp_fp']:.4f}  \n"
               f"- **White**: LM p = {het['white_p']:.4f}, F p = {het['white_fp']:.4f}\n"
-              "  *Interpretation:* **small p-values (<0.05)** suggest **heteroskedasticity** (residual variance depends on months). "
-              "If detected, report heteroskedasticity-robust standard errors (e.g., HC3) when presenting any coefficients.\n")
+              "  *Interpretation:* **small p-values (<0.05)** suggest **heteroskedasticity conditional on the regressors** "
+              "(here: month dummies).\n")
 
-    # Clear conclusion for (hetero)skedasticity
+    # ARCH LM (time-varying volatility)
+    if "arch_lm" in arch:
+        md.append(
+            f"- **ARCH LM (lags={arch['arch_lags']})**: LM p = {arch['arch_lm_p']:.4f}, F p = {arch['arch_fp']:.4f}  \n"
+            "  *Interpretation:* **small p-values (<0.05)** indicate **conditional heteroskedasticity** "
+            "(volatility clustering) in residuals.\n")
+    else:
+        md.append(f"- **ARCH LM**: not available ({arch.get('arch_error', 'n/a')}).\n")
+
+    # Clear conclusion combining BP/White + ARCH
     bp_min_p = np.nanmin([het.get("bp_p", np.nan), het.get("bp_fp", np.nan)])
     white_min_p = np.nanmin([het.get("white_p", np.nan), het.get("white_fp", np.nan)])
-    if (bp_min_p < 0.05) or (white_min_p < 0.05):
+    arch_min_p = np.nanmin([arch.get("arch_lm_p", np.nan), arch.get("arch_fp", np.nan)])
+
+    tests_p = [bp_min_p, white_min_p, arch_min_p]
+    any_hetero = any(np.isfinite(p) and p < 0.05 for p in tests_p)
+    all_large = all(np.isfinite(p) and p > 0.10 for p in tests_p if np.isfinite(p))
+
+    if any_hetero:
         homo_concl = ("**Conclusion:** Evidence of **heteroskedasticity**. "
-                      "Coefficient standard errors should be computed with robust estimators (e.g., HC3).")
-    elif (bp_min_p > 0.10) and (white_min_p > 0.10):
+                      "Report **robust standard errors** (HC3; and **HAC/Newey–West** if serial correlation is present).")
+    elif all_large:
         homo_concl = ("**Conclusion:** Tests **do not suggest heteroskedasticity** at conventional levels. "
-                      "A homoskedastic error assumption appears reasonable.")
+                      "A homoskedastic assumption appears reasonable; **robust SEs** are still a conservative default in finance.")
     else:
-        homo_concl = ("**Conclusion:** **Mixed/ambiguous** evidence. Consider reporting both conventional "
-                      "and heteroskedasticity-robust standard errors.")
+        homo_concl = ("**Conclusion:** **Mixed/ambiguous** evidence (some tests borderline). "
+                      "Prefer **robust/HAC standard errors** to be safe.")
+
     md.append(homo_concl + "\n")
 
     # Structural breaks
