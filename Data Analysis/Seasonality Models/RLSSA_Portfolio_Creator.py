@@ -1,124 +1,104 @@
 import re
 import numpy as np
 import pandas as pd
-import scipy.linalg as la
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
-from scipy.stats import norm
 
 # -----------------------------------------------------------------------------
 # 1) PARAMETERS
 # -----------------------------------------------------------------------------
 START_DATE      = datetime(2001, 1, 1)
-LOOKBACK_YEARS  = 10   # only used to build SSA history
-CALIB_YEARS     = 5
+LOOKBACK_YEARS  = 10                 # rolling history for RLSSA & EWMA vol
 FINAL_END       = datetime(2024, 12, 31)
 
 NUM_SELECT      = 1
-STRICT_SEL      = False
-MODE            = "Short" # "Long", "Short", or "LongShort"
-SIG_LEVEL       = 1
+MODE            = "Long"            # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
-SSA_COMPS       = 2
+SSA_COMPS       = 2                  # robust rank (q)
 
-ENTRY_COST      = EXIT_COST = 0.0025
+# EWMA volatility on monthly *simple* returns over the same 10y slice
+USE_EWMA_SCALE  = True               # required by your spec; keep toggle for flexibility
+EWMA_LAMBDA     = 0.94               # monthly lambda; alpha = 1 - lambda
+MIN_OBS_FOR_VOL = 12                 # minimum months for EWMA vol
+
+ENTRY_COST      = 0.005             # apply at month entry when positions exist
 START_VALUE     = 1000.0
-PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
+PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
+VOLUME_THRESHOLD = 1000
 DEBUG_DATE      = datetime(2016, 1, 1)
 
 # Data paths
-VOLUME_THRESHOLD = 1000
-ROOT_DIR    = Path().resolve().parent.parent / "Complete Data"
-MONTHLY_DIR = ROOT_DIR / "All_Monthly_Return_Data"
+ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
 
 # -----------------------------------------------------------------------------
-# 2) BUILD SSA HISTORY
+# 2) DATA LOADERS
 # -----------------------------------------------------------------------------
 def load_monthly_returns(root_dir: Path) -> dict[str, pd.Series]:
     """
-    Loads all “*_Monthly_Revenues.csv” files from root_dir,
-    parses year/month → datetime, coerces returns to numeric,
-    and returns a dict ticker → pd.Series indexed by date.
+    Loads all '*_Monthly_Revenues.csv' from root_dir, returns dict ticker->Series(date->return)
     """
     out: dict[str, pd.Series] = {}
     for path in sorted(root_dir.glob("*_Monthly_Revenues.csv")):
         ticker = path.stem.replace("_Monthly_Revenues", "")
         df = pd.read_csv(path)
-
-        # build a proper datetime index
         df['date'] = pd.to_datetime(df[['year','month']].assign(day=1))
-
-        # coerce the return column
         df['return'] = pd.to_numeric(df['return'], errors='coerce')
-
-        # extract a Series indexed by date
         series = df.set_index('date')['return'].sort_index()
-
         out[ticker] = series
-
     return out
 
 # -----------------------------------------------------------------------------
-# 2) ROBUST SSA HELPERS
+# 3) RLSSA (Robust Low-Rank SSA)
 # -----------------------------------------------------------------------------
 def robust_low_rank(X: np.ndarray, q: int, max_iter: int = 25, eps: float = 1e-7):
     """
-    Very simple IRLS-style robust low-rank approximation:
-      minimize ~ sum_{lk} w_{lk} (X_{lk} - (UV^T)_{lk})^2 with w_{lk} ≈ 1/(|resid|+eps).
-    Returns factors U (L×q), V (K×q) so that S ≈ U V^T.
+    Simple IRLS-style robust low-rank approximation:
+      minimize ~ sum w_{ij} (X_ij - (UV^T)_ij)^2 with w_{ij} ≈ 1/(|resid|+eps).
+    Returns U (L×q), V (K×q) such that S ≈ U V^T.
     """
-    # init with truncated SVD of X
     U0, s0, V0t = np.linalg.svd(X, full_matrices=False)
     r0 = min(q, s0.size)
     U = U0[:, :r0] * np.sqrt(s0[:r0])
     V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
 
     for _ in range(max_iter):
-        R = X - U @ V.T                         # residuals
-        W = 1.0 / (np.abs(R) + eps)            # L1-like weights (elementwise)
-        # weighted matrix (elementwise) for next SVD step
+        R = X - U @ V.T
+        W = 1.0 / (np.abs(R) + eps)
         Xw = np.sqrt(W) * X
         Uw, sw, Vwt = np.linalg.svd(Xw, full_matrices=False)
         r0 = min(q, sw.size)
-        # rescale back to unweighted factors (heuristic)
         U = Uw[:, :r0] * np.sqrt(sw[:r0])
         V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
 
     return U, V
 
-
 def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
     """
-    RLSSA one-step forecast following Kazemi & Rodrigues (2023) + SSA recurrence:
-      1) Build Hankel trajectory X (L×K)
+    RLSSA one-step forecast:
+      1) Hankel embed X (L×K)
       2) Robust low-rank S ≈ U V^T (rank q)
-      3) Hankelize S → robust fitted series \tilde X (length N)
-      4) Classical SVD on S to get left singular vectors U_j
-      5) Compute RL coefficients \hat a and forecast \hat y_{N+1}
-
-    Returns scalar \hat y_{N+1}. np.nan on failure.
+      3) Hankelize S -> robust fitted rec (length N)
+      4) SVD(S) -> Uc; build recurrent coefficients a from Uc
+      5) Forecast \hat y_{N+1} = sum a_j * rec[N+1-j], j=1..L-1
+    Returns scalar forecast or np.nan on failure.
     """
     x = np.asarray(series, dtype=float).ravel()
     if np.any(~np.isfinite(x)):
         return np.nan
-
     N = x.size
     if not (1 < L < N) or q < 1:
         return np.nan
     K = N - L + 1
 
-    # 1) Embedding (Hankel)
     X = np.column_stack([x[i:i+L] for i in range(K)])  # L×K
-
-    # 2) Robust decomposition: S ≈ U V^T (rank q)
     U_r, V_r = robust_low_rank(X, q=q)
-    S = U_r @ V_r.T                                    # L×K robust "signal" matrix
+    S = U_r @ V_r.T
 
-    # 3) Diagonal averaging (Hankelization) → \tilde X (length N)
+    # Hankelize S
     rec = np.zeros(N, dtype=float)
     cnt = np.zeros(N, dtype=float)
     for i in range(L):
@@ -127,41 +107,33 @@ def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
             cnt[i + j] += 1.0
     if not np.all(cnt > 0):
         return np.nan
-    rec /= cnt   # \tilde x_1..N
+    rec /= cnt
 
-    # 4) Classical SVD on S to obtain left singular vectors for LRR coefficients
-    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)  # Uc: L×r_svd
-    r_eff = int(min(q, sc.size))                         # keep first r (same q)
+    # Classical SVD on S (for recurrence)
+    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)
+    r_eff = int(min(q, sc.size))
     if r_eff < 1:
         return np.nan
     Uc = Uc[:, :r_eff]
 
-    # Split each left singular vector into first L-1 entries and last entry
-    P_head = Uc[:-1, :]                      # (L-1)×r
-    phi    = Uc[-1, :]                       # length r
-    nu2    = float(np.dot(phi, phi))         # sum phi_j^2
-
+    P_head = Uc[:-1, :]        # (L-1)×r
+    phi    = Uc[-1, :]         # length r
+    nu2    = float(np.dot(phi, phi))
     if 1.0 - nu2 <= 1e-10:
         return np.nan
 
-    # \hat a = (a_{L-1},...,a_1)^T = (1/(1-ν^2)) * sum_j φ_j * U_j^{triangle}
-    R = (P_head @ phi) / (1.0 - nu2)         # length L-1: (a_{L-1},...,a_1)
-    a = R[::-1]                              # (a_1,...,a_{L-1})
+    R = (P_head @ phi) / (1.0 - nu2)   # (a_{L-1},...,a_1)
+    a = R[::-1]                         # (a_1,...,a_{L-1})
 
-    # 5) One-step forecast using the robust fitted tail (Step 4 relationship)
-    # use (\tilde x_N, ..., \tilde x_{N-L+2}) as regressors
-    lags = rec[-1: -L: -1]                   # length L-1
+    lags = rec[-1: -L: -1]
     if lags.size != a.size:
         return np.nan
-
-    y_hat_next = float(np.dot(a, lags))
-    return y_hat_next
-
+    return float(np.dot(a, lags))
 
 def build_rlssa_history(returns):
     """
-    Same logic as your build_ssa_history, but calls compute_rlssa to store the
-    RLSSA **one-step forecast** available at each evaluation month.
+    For each month t, compute an RLSSA forecast using the last LOOKBACK_YEARS returns
+    (ending at t-1). Index = forecast months (MS); columns = tickers.
     """
     start = (START_DATE + relativedelta(years=LOOKBACK_YEARS)).replace(day=1)
     end   = FINAL_END.replace(day=1)
@@ -174,11 +146,10 @@ def build_rlssa_history(returns):
         for tkr, series in returns.items():
             window = series.loc[lb0:lb1].values
             rlssa_df.at[dt, tkr] = compute_rlssa(window, L=SSA_WINDOW, q=SSA_COMPS)
-
     return rlssa_df
 
 # -----------------------------------------------------------------------------
-# 3) CONTRACT FINDER
+# 4) CONTRACT FINDER
 # -----------------------------------------------------------------------------
 def find_contract(ticker: str, year: int, month: int):
     root    = Path().resolve().parent.parent / "Complete Data" / f"{ticker}_Historic_Data"
@@ -216,16 +187,13 @@ def find_contract(ticker: str, year: int, month: int):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        # Must trade through month-end + 15 days
         if df["Date"].max() < mend + timedelta(days=15):
             continue
 
-        # In-month slice
         mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
         if mdf.empty:
             continue
 
-        # Volume checks
         if "volume" not in mdf.columns:
             print(f"  • rejected {year}-{month:02d} {ticker} file {p.name}: no 'volume' column.")
             continue
@@ -233,11 +201,8 @@ def find_contract(ticker: str, year: int, month: int):
         vol = pd.to_numeric(mdf["volume"], errors="coerce")
         avg_vol = float(vol.mean(skipna=True))
         if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
-            # Uncomment if you want verbose reason:
-            # print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: avg vol {avg_vol:.0f} < {VOLUME_THRESHOLD}.")
             continue
 
-        # Candidate accepted (sort by date for consistent first/last rows)
         candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
 
     if not candidates:
@@ -254,31 +219,67 @@ def find_contract(ticker: str, year: int, month: int):
             )
         return None, None
 
-    # Pick the closest acceptable front-month
     _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
     return ticker, best_mdf
 
 # -----------------------------------------------------------------------------
-# 4) PREP & SSA TABLE
+# 5) PREP & RLSSA TABLE
 # -----------------------------------------------------------------------------
 base = Path().resolve().parent.parent / "Complete Data"
 
-log_returns    = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
-returns = load_monthly_returns(base / "All_Monthly_Return_Data")
+# RLSSA modeling on LOG monthly returns (input series for forecasting)
+log_returns      = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
+# EWMA volatility computed on SIMPLE monthly returns (realized % series)
+simple_returns   = load_monthly_returns(base / "All_Monthly_Return_Data")
 
-ssa_score = build_rlssa_history(log_returns)
-print(ssa_score)
-tickers   = list(returns)
+rlssa_score = build_rlssa_history(log_returns)
+print(rlssa_score)
+tickers   = list(simple_returns)
 
-# first possible forecast date
-initial_lb_end       = (START_DATE + relativedelta(years=LOOKBACK_YEARS)
-                        - pd.offsets.MonthEnd(1))
-first_trade_forecast = (initial_lb_end
-                        + pd.offsets.MonthBegin(1)
-                        + relativedelta(years=CALIB_YEARS))
+# First possible forecast date (after first 10y window)
+initial_lb_end       = (START_DATE + relativedelta(years=LOOKBACK_YEARS) - pd.offsets.MonthEnd(1))
+first_trade_forecast = initial_lb_end + pd.offsets.MonthBegin(1)
 
 # -----------------------------------------------------------------------------
-# 5) MAIN LOOP (using only ssa_score & calibration slice)
+# Helper: realized monthly return from daily bars (consistent with daily compounding)
+# -----------------------------------------------------------------------------
+def realized_month_return_from_daily(mdf: pd.DataFrame, is_short: bool) -> float:
+    """
+    From month-sliced daily DataFrame (with 'open','close'), compute realized month return.
+    Long: compound daily simple returns; Short: r_short = 1/(1+r_long) - 1 per day.
+    """
+    if mdf is None or mdf.empty:
+        return np.nan
+    mdf = mdf.sort_values("Date")
+    prev = None
+    factor = 1.0
+    for row in mdf.itertuples():
+        c = row.close
+        if prev is None:
+            o = row.open
+            r_long = (c / o) - 1.0
+        else:
+            r_long = (c / prev) - 1.0
+        step = (1.0 / (1.0 + r_long) - 1.0) if is_short else r_long
+        factor *= (1.0 + step)
+        prev = c
+    return factor - 1.0
+
+def ewma_vol(series: pd.Series, lb0: datetime, lb1: datetime, lam: float, min_obs: int) -> float:
+    """
+    EWMA volatility on monthly *simple* returns over [lb0, lb1].
+    Returns sigma (float) or np.nan if insufficient data.
+    """
+    win = series.loc[lb0:lb1].dropna()
+    if len(win) < min_obs:
+        return np.nan
+    alpha = 1.0 - lam
+    ewma_var = (win**2).ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+    sigma = float(np.sqrt(ewma_var)) if np.isfinite(ewma_var) else np.nan
+    return sigma if (np.isfinite(sigma) and sigma > 0) else np.nan
+
+# -----------------------------------------------------------------------------
+# 6) MAIN LOOP (RLSSA forecast; EWMA scaling on same 10y slice)
 # -----------------------------------------------------------------------------
 records = []
 cur     = initial_lb_end + pd.offsets.MonthBegin(0)
@@ -288,84 +289,56 @@ while cur <= FINAL_END:
         cur += relativedelta(months=1)
         continue
 
-    # 1) get current SSA vector
-    current_ssa = ssa_score.loc[cur]
+    # 1) RLSSA forecasts (per ticker) at forecast month 'cur'
+    current_f = rlssa_score.loc[cur]
 
-    # 2) slice calibration block
-    cal_start = cur - relativedelta(years=CALIB_YEARS)
-    cal_end   = cur - relativedelta(months=1)
-    calib_block = ssa_score.loc[cal_start:cal_end]
+    # 2) EWMA vol over the SAME 10-year slice
+    lb0 = (cur - relativedelta(years=LOOKBACK_YEARS)).to_pydatetime()
+    lb1 = (cur - relativedelta(months=1)).to_pydatetime()
 
-    # 3) compute mean & std per ticker
-    means = calib_block.mean()
-    stds  = calib_block.std(ddof=1)
-
-    # 4) compute raw list with z & p-values
-    raw = []
-    for t in tickers:
-        sc = current_ssa[t]
-        if np.isnan(sc) or stds[t] <= 0:
+    # 3) Build list of adjusted scores
+    candidates = []
+    for tkr in tickers:
+        sc = current_f.get(tkr, np.nan)
+        if not np.isfinite(sc):
             continue
-        z = (sc - means[t]) / stds[t]
-        p = 2*(1 - norm.cdf(abs(z)))
-        raw.append((t, sc, z, p))
 
-    # debug
-    if cur == DEBUG_DATE:
-        print(f"[DEBUG] SSA/P on {DEBUG_DATE.date()}:")
-        print(calib_block)
-        print(pd.DataFrame(raw, columns=['Tkr','SSA','Z','P']).set_index('Tkr'))
+        if USE_EWMA_SCALE:
+            sigma = ewma_vol(simple_returns[tkr], lb0, lb1, EWMA_LAMBDA, MIN_OBS_FOR_VOL)
+            if not np.isfinite(sigma):
+                continue
+            score = sc / sigma
+        else:
+            score = sc
 
-    # 5) select signals
-    sigL = sorted([r for r in raw if r[1] > 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1], reverse=True)
-    sigS = sorted([r for r in raw if r[1] < 0 and r[3] <= SIG_LEVEL], key=lambda x: x[1])
+        candidates.append((tkr, sc, score))
 
-    # the “rest” sorted by score
-    restL = sorted([r for r in raw if r not in sigL], key=lambda x: x[1], reverse=True)
-    restS = sorted([r for r in raw if r not in sigS], key=lambda x: x[1])
-
-    picks = []
-
+    # 4) Rank & pick by adjusted 'score'
+    K = max(1, NUM_SELECT)
     if MODE == "Long":
-        # if strict and not enough signals, nothing
-        if STRICT_SEL and len(sigL) < NUM_SELECT:
-            picks = []
-        else:
-            # take up to NUM_SELECT from the sigL (if any), then pad from restL
-            pool = sigL + restL
-            picks = [t for t, _, _, _ in pool[:NUM_SELECT]]
-
+        picks = [t for (t, sc, s) in sorted(candidates, key=lambda x: x[2], reverse=True)[:K]]
     elif MODE == "Short":
-        if STRICT_SEL and len(sigS) < NUM_SELECT:
-            picks = []
-        else:
-            pool = sigS + restS
-            picks = [f"-{t}" for t, _, _, _ in pool[:NUM_SELECT]]
-
+        picks = [f"-{t}" for (t, sc, s) in sorted(candidates, key=lambda x: x[2])[:K]]
     else:  # LongShort
-        half = NUM_SELECT // 2
-        longs_enough = len(sigL) >= half
-        shorts_enough = len(sigS) >= half
-        if STRICT_SEL and not (longs_enough and shorts_enough):
-            picks = []
-        else:
-            longs_pool = sigL + restL
-            shorts_pool = sigS + restS
-            longs_pick = [t for t, _, _, _ in longs_pool[:half]]
-            shorts_pick = [f"-{t}" for t, _, _, _ in shorts_pool[:half]]
-            picks = longs_pick + shorts_pick
+        half = max(1, K // 2)
+        rank_sorted = sorted(candidates, key=lambda x: x[2])
+        shorts_pick = [f"-{t}" for (t, sc, s) in rank_sorted[:half]]
+        longs_pick  = [t for (t, sc, s) in rank_sorted[::-1][:half]]
+        picks = longs_pick + shorts_pick
 
-    # 6) fetch contracts & record
+    # 5) Fetch contracts & compute realized monthly returns from DAILY bars
     daily, contrib = {}, []
-    comb = 0.0; n = max(1, len(picks))
+    comb = 0.0
+    n = max(1, len(picks))
     for sig in picks:
         tkr = sig.lstrip('-')
         _, mdf = find_contract(tkr, cur.year, cur.month)
         daily[sig] = mdf
-        r = returns[tkr].get(datetime(cur.year, cur.month, 1), np.nan)
-        w = (1/(1+r)-1 if sig.startswith('-') else r)/n
+
+        r_month = realized_month_return_from_daily(mdf, is_short=sig.startswith('-'))
+        w = r_month / n
         comb += w
-        contrib.append(f"{sig}:{r:.2%}→{w:.2%}")
+        contrib.append(f"{sig}:{r_month:+.2%}→{w:+.2%}")
 
     records.append({
         'forecast': cur,
@@ -375,10 +348,13 @@ while cur <= FINAL_END:
         'daily_dfs': daily
     })
 
+    if cur == DEBUG_DATE:
+        print(f"[DEBUG] {cur.date()} | picks={picks}")
+
     cur += relativedelta(months=1)
 
 # -----------------------------------------------------------------------------
-# 6) TABULATE & PLOT
+# 7) TABULATE & PLOT
 # -----------------------------------------------------------------------------
 hist_df = pd.DataFrame([{
     'forecast': rec['forecast'],
@@ -387,26 +363,24 @@ hist_df = pd.DataFrame([{
     'combined_ret': rec['combined']
 } for rec in records])
 
-
 pd.set_option('display.precision', 20)
 print(hist_df.to_string(index=False))
 
-tot_return = 1
+tot_return = 1.0
 for r in hist_df['combined_ret']:
     tot_return *= (1 + r)
 print(f"\nTotal return for {len(records)} months: {tot_return-1:.2%}")
 
 # -----------------------------------------------------------------------------
-# 6) PERFORMANCE & PLOT (no costs when not trading)
+# 8) PERFORMANCE & PLOT (no costs when not trading)
 # -----------------------------------------------------------------------------
 vc_nc = vc_wc = START_VALUE
 dates, nc, wc, overall_return, cur_return = [], [], [], [], []
 Overall_Return = 1.0
+
 for rec in records:
-    #Overall_Return = 1
     fc = rec['forecast']
     if not (PLOT_START <= fc <= PLOT_END):
-        print(f"Forcast: {fc}")
         continue
 
     daily = rec['daily_dfs']
@@ -414,38 +388,30 @@ for rec in records:
         d = (fc) + pd.offsets.MonthEnd(0)
         dates += [d]; nc += [vc_nc]; wc += [vc_wc]; overall_return += [Overall_Return]; cur_return += [0.0]
     else:
+        # entry cost once at month start (before first day’s returns)
         vc_wc *= (1 - ENTRY_COST)
-        all_df = pd.concat([mdf.assign(signal=s) for s,mdf in daily.items()])\
-                   .sort_values('Date')
-        prevs  = {s:None for s in daily}
+
+        all_df = pd.concat([mdf.assign(signal=s) for s, mdf in daily.items()]).sort_values('Date')
+        prevs  = {s: None for s in daily}
+
         for d, grp in all_df.groupby('Date'):
             rs = 0.0
             for r in grp.itertuples():
-                sig = r.signal
-                prev = prevs[sig]
+                sig   = r.signal
+                prev  = prevs[sig]
                 close = r.close
-                # first bar: use open→close
                 if prev is None:
                     open_ = r.open
-                    if sig.startswith('-'):
-                        # short: entry price is the open, exit is close
-                        ret = open_ / close - 1
-                    else:
-                        # long
-                        ret = close / open_ - 1
+                    r_long = (close / open_) - 1.0
                 else:
-                    # subsequent bars: prev is last-close
-                    if sig.startswith('-'):
-                        # short: profit = prev / close - 1
-                        ret = prev / close - 1
-                    else:
-                        # long: profit = close / prev - 1
-                        ret = close / prev - 1
+                    r_long = (close / prev) - 1.0
 
-                rs += ret / len(daily)
+                # Exact short step: 1/(1+r_long) - 1 == open/close - 1 at first step, prev/close - 1 later
+                step_ret = (1.0/(1.0 + r_long) - 1.0) if sig.startswith('-') else r_long
+
+                rs += step_ret / len(daily)
                 prevs[sig] = close
 
-            # now compound
             vc_nc *= (1 + rs)
             vc_wc *= (1 + rs)
             Overall_Return *= (1 + rs)
@@ -455,37 +421,32 @@ for rec in records:
             overall_return.append(Overall_Return)
             cur_return.append(rs)
 
-print(len(dates), len(nc), len(wc), len(overall_return), len(cur_return))
-
-perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc, 'Tot_Return': overall_return, 'cur_return': cur_return})\
-           .set_index('Date')
-#perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc})\
-#           .set_index('Date')
-
-#print(perf.to_string(index=True))
+perf = pd.DataFrame(
+    {'Date': dates, 'NoCosts': nc, 'WithCosts': wc,
+     'Tot_Return': overall_return, 'cur_return': cur_return}
+).set_index('Date')
 
 final_nc    = perf['NoCosts'].iloc[-1]
 final_wc    = perf['WithCosts'].iloc[-1]
 tot_nc      = (final_nc/START_VALUE - 1)*100
 tot_wc      = (final_wc/START_VALUE - 1)*100
-
 print(tot_nc)
 
-title_str = f"RLSSA_{MODE}_Portfolio_{NUM_SELECT}_A_&_LB_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}_SS_{STRICT_SEL}.png"
+scale_tag = "EWMA94" if USE_EWMA_SCALE else "RAW"
+title_str = f"RLSSA_{scale_tag}_{MODE}_Portfolio_{NUM_SELECT}_LB_{LOOKBACK_YEARS}Y.png"
+
 output_dir = Path("plots/RLSSA_Plots")
 output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],  label=f'No Costs (Total: {tot_nc:.2f}%)')
-plt.plot(perf.index, perf['WithCosts'],label=f'With Costs (Total: {tot_wc:.2f}%)')
-plt.xlabel('Date')
-plt.ylabel('Portfolio Value (CHF)')
-plt.title(f'RLSSA {MODE} Portfolio with {NUM_SELECT} Assets & Lookback of {LOOKBACK_YEARS} Years & SL {SIG_LEVEL} & SS {STRICT_SEL}')
-plt.legend()
-plt.grid(True)
+plt.plot(perf.index, perf['WithCosts'], label=f'With Costs (Total: {tot_wc:.2f}%)')
+plt.xlabel('Date'); plt.ylabel('Portfolio Value (CHF)')
+plt.title(f'RLSSA {NUM_SELECT} {MODE} Portfolio — {scale_tag} scaling — LB {LOOKBACK_YEARS}y')
+plt.legend(); plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-#plt.show()
+plt.show()
 
-save_path = output_dir / title_str
-plt.savefig(save_path, dpi=300)
+# save_path = output_dir / title_str
+# plt.savefig(save_path, dpi=300)

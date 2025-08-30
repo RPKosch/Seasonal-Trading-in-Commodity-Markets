@@ -17,13 +17,12 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 FINAL_END       = datetime(2024, 12, 31)
 
 START_VALUE      = 1000.0
-ENTRY_COST       = 0.0025
-EXIT_COST        = 0.0025
+ENTRY_COST       = 0.005
 LOOKBACK_YEARS   = 10      # or None for full history
 NUM_SELECT       = 1
-STRICT_SEL       = True
-MODE             = "Long"   # "Long", "Short", or "LongShort"
-SIG_LEVEL        = 0.05
+STRICT_SEL       = False
+MODE             = "Short"   # "Long", "Short", or "LongShort"
+SIG_LEVEL        = 1
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
@@ -192,21 +191,22 @@ while current <= FINAL_END:
 
         stats.append((tkr, beta, pval, avg_m))
 
-    # split into long‑eligible, short‑eligible, and “rest”
-    longs_elig  = [(avg_m, tkr) for tkr,b,p,avg_m in stats if p <= SIG_LEVEL and avg_m>0 and b>0]
-    shorts_elig = [(avg_m, tkr) for tkr,b,p,avg_m in stats if p <= SIG_LEVEL and avg_m<0 and b<0]
+    longs_elig = [(b, t) for (t, b, p, m) in stats if p <= SIG_LEVEL and b > 0]
+    shorts_elig = [(b, t) for (t, b, p, m) in stats if p <= SIG_LEVEL and b < 0]
 
-    rest_longs  = [(avg_m, tkr) for tkr,b,p,avg_m in stats
-                   if (tkr not in [tk for _,tk in longs_elig])]
-    rest_shorts = [(avg_m, tkr) for tkr,b,p,avg_m in stats
-                   if (tkr not in [tk for _,tk in shorts_elig])]
+    # everyone else goes to the "rest" buckets, carrying their beta as the key
+    long_elig_names = {t for _, t in longs_elig}
+    short_elig_names = {t for _, t in shorts_elig}
 
-    # sort
-    longs_elig.sort(key=lambda x: x[0], reverse=True)    # highest avg_m first
-    rest_longs.sort(key=lambda x: x[0], reverse=True)    # highest avg_m first
+    rest_longs = [(b, t) for (t, b, p, m) in stats if t not in long_elig_names]
+    rest_shorts = [(b, t) for (t, b, p, m) in stats if t not in short_elig_names]
 
-    shorts_elig.sort(key=lambda x: x[0])                 # lowest avg_m (most negative) first
-    rest_shorts.sort(key=lambda x: x[0])                 # lowest avg_m first
+    # --- sort by BETA magnitude/sign direction ---
+    longs_elig.sort(key=lambda x: x[0], reverse=True)  # highest positive beta first
+    rest_longs.sort(key=lambda x: x[0], reverse=True)
+
+    shorts_elig.sort(key=lambda x: x[0])  # most negative beta first
+    rest_shorts.sort(key=lambda x: x[0])
 
     # build final picks
     selected = []
@@ -340,6 +340,7 @@ for rec in records:
             if sig.startswith('-'):
                 # exact short return:
                 r = 1.0 / (1.0 + r_long) - 1.0
+                #r = -r_long
             else:
                 r = r_long
 
@@ -403,7 +404,7 @@ plt.legend()
 plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-#plt.show()
+plt.show()
 
-save_path = output_dir / title_str
-plt.savefig(save_path, dpi=300)
+#save_path = output_dir / title_str
+#plt.savefig(save_path, dpi=300)

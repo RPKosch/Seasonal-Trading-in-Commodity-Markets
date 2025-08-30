@@ -6,7 +6,7 @@ from dateutil.relativedelta import relativedelta
 # ----------------------------
 # User settings
 # ----------------------------
-end_date       = "2015-12-20"
+end_date       = "2020-5-20"
 LOOKBACK_YEARS = 10
 SIGN_LEVEL     = 1
 
