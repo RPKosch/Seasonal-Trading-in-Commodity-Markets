@@ -13,8 +13,8 @@ START_DATE      = datetime(2001, 1, 1)
 LOOKBACK_YEARS  = 10                 # rolling history for RLSSA & EWMA vol
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 1
-MODE            = "Long"            # "Long", "Short", or "LongShort"
+NUM_SELECT      = 2
+MODE            = "LongShort"            # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2                  # robust rank (q)

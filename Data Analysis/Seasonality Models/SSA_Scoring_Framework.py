@@ -5,14 +5,14 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # --- User parameters ---
-L          = 12        # SSA window length
-J          = 2         # Number of components to reconstruct
+SSA_WINDOW          = 12        # SSA window length
+SSA_COMPS          = 2         # Number of components to reconstruct
 K_SELECT   = 2         # How many tickers to long/short
 # Define analysis window by year & month:
-START_YEAR, START_MONTH             = 2014, 12
-FINAL_END_YEAR, FINAL_END_MONTH     = 2024, 11
+START_YEAR, START_MONTH             = 2001, 1
+FINAL_END_YEAR, FINAL_END_MONTH     = 2010, 12
 # Lookback in years (None => full history)
-LOOKBACK_YEARS   = None
+LOOKBACK_YEARS   = 10
 
 # --- Compute actual date endpoints ---
 start_date = datetime(START_YEAR, START_MONTH, 1)
@@ -21,43 +21,54 @@ final_end = (datetime(FINAL_END_YEAR, FINAL_END_MONTH, 1)
              + pd.offsets.MonthEnd(0))
 
 # --- Helper: SSA‐based score for one pandas Series ---
-def ssa_score(series: pd.Series, L: int, J: int):
-    x = series.values.astype(float)
-    N = len(x)
-    if N < L:
-        return np.full(N, np.nan), np.nan
+def compute_ssa(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float).ravel()
+    N = len(x); L = int(SSA_WINDOW); r = int(SSA_COMPS)
+    if N < max(L, 3) or L <= 1 or L >= N or r < 1: return np.nan
+    if np.isnan(x).any(): return np.nan
 
-    # 1. Hankel embedding
     K = N - L + 1
-    X = np.column_stack([x[i:i+L] for i in range(K)])
-    # 2. SVD on lag‐covariance
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # L x K
+
     S = X @ X.T
-    λ, U = np.linalg.eigh(S)
-    idx = np.argsort(λ)[::-1]
-    λ, U = λ[idx], U[:, idx]
-    # 3. Reconstruct top‐J components
-    Xj = sum(
-        np.sqrt(λ[m]) * np.outer(
-            U[:, m],
-            (X.T @ U[:, m]) / np.sqrt(λ[m])
-        )
-        for m in range(J)
-    )
-    # 4. Diagonal averaging (Hankelization)
-    rec    = np.zeros(N)
-    counts = np.zeros(N)
+    eigvals, eigvecs = np.linalg.eigh(S)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]; eigvecs = eigvecs[:, order]
+    eps = 1e-12
+    pos = eigvals > eps
+    if not np.any(pos): return np.nan
+    eigvals = eigvals[pos]; eigvecs = eigvecs[:, pos]
+
+    r_eff = int(min(r, eigvals.size))
+    U = eigvecs[:, :r_eff]
+    sigma = np.sqrt(eigvals[:r_eff])
+    V = (X.T @ U) / sigma
+
+    Xr = (U * sigma) @ V.T
+
+    rec = np.zeros(N); cnt = np.zeros(N)
     for i in range(L):
         for j in range(K):
-            rec[i+j]    += Xj[i, j]
-            counts[i+j] += 1
-    rec /= counts
-    # 5. Final score = mean of last L reconstructed values
-    score = rec[-L:].mean()
-    return rec, score
+            rec[i + j] += Xr[i, j]
+            cnt[i + j] += 1.0
+    if not np.all(cnt > 0): return np.nan
+    rec /= cnt
+
+    P_head = U[:-1, :]
+    pi = U[-1, :]
+    nu2 = float(np.dot(pi, pi))
+    if 1.0 - nu2 <= 1e-10: return np.nan
+
+    R = (P_head @ pi) / (1.0 - nu2)
+    a = R[::-1]
+
+    lags = rec[-1: -L: -1]
+    if lags.size != a.size: return np.nan
+    return float(np.dot(a, lags))
 
 # --- Gather all assets ---
 project_root = Path().resolve().parent.parent
-monthly_dir  = project_root / "Complete Data" / "All_Monthly_Return_Data"
+monthly_dir  = project_root / "Complete Data" / "All_Monthly_Log_Return_Data"
 paths        = list(monthly_dir.glob("*_Monthly_Revenues.csv"))
 ASSET_LIST   = [p.stem.replace("_Monthly_Revenues","") for p in paths]
 
@@ -78,11 +89,13 @@ for ticker in ASSET_LIST:
         cutoff = final_end - relativedelta(years=LOOKBACK_YEARS)
         df     = df.loc[cutoff:final_end]
 
+    print(f"df {df}")
+
     # ensure returns are numeric
     series = df['return'].astype(float)
 
     # compute SSA score
-    _, final_score = ssa_score(series, L, J)
+    final_score = compute_ssa(series)
     scores[ticker] = final_score
 
 # --- Rank and select ---

@@ -14,7 +14,7 @@ LOOKBACK_YEARS  = 10
 FINAL_END       = datetime(2024, 12, 31)
 
 NUM_SELECT      = 1
-MODE            = "Long"   # "Long", "Short", or "LongShort"
+MODE            = "LongShort"   # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
@@ -175,6 +175,7 @@ log_returns = load_monthly_returns(base / "All_Monthly_Log_Return_Data")
 returns     = load_monthly_returns(base / "All_Monthly_Return_Data")
 
 ssa_score = build_ssa_history(log_returns)
+print(f"ssa_score {ssa_score}")
 tickers   = list(returns)
 
 initial_lb_end       = (START_DATE + relativedelta(years=LOOKBACK_YEARS) - pd.offsets.MonthEnd(1))

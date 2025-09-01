@@ -11,7 +11,7 @@ q                   = 2     # Number of L1‐robust components
 K_SELECT            = 2     # How many tickers to long/short
 # Define analysis window by year & month:
 START_YEAR, START_MONTH             = 2001, 1
-FINAL_END_YEAR, FINAL_END_MONTH     = 2015, 12
+FINAL_END_YEAR, FINAL_END_MONTH     = 2011, 3
 # Lookback in years (None => full history)
 LOOKBACK_YEARS      = 10
 
@@ -20,40 +20,84 @@ start_date = datetime(START_YEAR, START_MONTH, 1)
 final_end  = (datetime(FINAL_END_YEAR, FINAL_END_MONTH, 1)
               + pd.offsets.MonthEnd(0))
 
-# --- Robust low‐rank helper ---
-def robust_low_rank(X, q, max_iter=25, eps=1e-7):
-    L_, K = X.shape
-    U0, s0, V0t = la.svd(X, full_matrices=False)
-    U = U0[:, :q] * np.sqrt(s0[:q])
-    V = (V0t[:q, :].T) * np.sqrt(s0[:q])
+# -----------------------------------------------------------------------------
+# 3) RLSSA (Robust Low-Rank SSA)
+# -----------------------------------------------------------------------------
+def robust_low_rank(X: np.ndarray, q: int, max_iter: int = 25, eps: float = 1e-7):
+    """
+    Simple IRLS-style robust low-rank approximation:
+      minimize ~ sum w_{ij} (X_ij - (UV^T)_ij)^2 with w_{ij} ≈ 1/(|resid|+eps).
+    Returns U (L×q), V (K×q) such that S ≈ U V^T.
+    """
+    U0, s0, V0t = np.linalg.svd(X, full_matrices=False)
+    r0 = min(q, s0.size)
+    U = U0[:, :r0] * np.sqrt(s0[:r0])
+    V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
+
     for _ in range(max_iter):
         R = X - U @ V.T
         W = 1.0 / (np.abs(R) + eps)
         Xw = np.sqrt(W) * X
-        Uw, sw, Vwt = la.svd(Xw, full_matrices=False)
-        U = Uw[:, :q] * np.sqrt(sw[:q])
-        V = (Vwt[:q, :].T) * np.sqrt(sw[:q])
+        Uw, sw, Vwt = np.linalg.svd(Xw, full_matrices=False)
+        r0 = min(q, sw.size)
+        U = Uw[:, :r0] * np.sqrt(sw[:r0])
+        V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
+
     return U, V
 
-# --- RLSSA‐score function ---
-def rlssa_score(series: pd.Series, L: int, q: int):
-    x = series.values.astype(float)
-    N = len(x)
-    if N < L:
+def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
+    """
+    RLSSA one-step forecast:
+      1) Hankel embed X (L×K)
+      2) Robust low-rank S ≈ U V^T (rank q)
+      3) Hankelize S -> robust fitted rec (length N)
+      4) SVD(S) -> Uc; build recurrent coefficients a from Uc
+      5) Forecast \hat y_{N+1} = sum a_j * rec[N+1-j], j=1..L-1
+    Returns scalar forecast or np.nan on failure.
+    """
+    x = np.asarray(series, dtype=float).ravel()
+    if np.any(~np.isfinite(x)):
+        return np.nan
+    N = x.size
+    if not (1 < L < N) or q < 1:
         return np.nan
     K = N - L + 1
-    X = np.column_stack([x[i:i+L] for i in range(K)])
-    U, V = robust_low_rank(X, q)
-    X_rob = U @ V.T
-    # diagonal averaging
-    rec, counts = np.zeros(N), np.zeros(N)
+
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # L×K
+    U_r, V_r = robust_low_rank(X, q=q)
+    S = U_r @ V_r.T
+
+    # Hankelize S
+    rec = np.zeros(N, dtype=float)
+    cnt = np.zeros(N, dtype=float)
     for i in range(L):
         for j in range(K):
-            rec[i+j]    += X_rob[i, j]
-            counts[i+j] += 1
-    rec /= counts
-    # score = mean of last L reconstructed points
-    return rec[-L:].mean()
+            rec[i + j] += S[i, j]
+            cnt[i + j] += 1.0
+    if not np.all(cnt > 0):
+        return np.nan
+    rec /= cnt
+
+    # Classical SVD on S (for recurrence)
+    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)
+    r_eff = int(min(q, sc.size))
+    if r_eff < 1:
+        return np.nan
+    Uc = Uc[:, :r_eff]
+
+    P_head = Uc[:-1, :]        # (L-1)×r
+    phi    = Uc[-1, :]         # length r
+    nu2    = float(np.dot(phi, phi))
+    if 1.0 - nu2 <= 1e-10:
+        return np.nan
+
+    R = (P_head @ phi) / (1.0 - nu2)   # (a_{L-1},...,a_1)
+    a = R[::-1]                         # (a_1,...,a_{L-1})
+
+    lags = rec[-1: -L: -1]
+    if lags.size != a.size:
+        return np.nan
+    return float(np.dot(a, lags))
 
 # --- Gather assets ---
 project_root = Path().resolve().parent.parent
@@ -71,15 +115,15 @@ for ticker in ASSET_LIST:
 
     # restrict to our analysis window
     df = df.loc[start_date:final_end]
-    print(df)
 
     # apply lookback if requested
     if LOOKBACK_YEARS is not None:
         cutoff = final_end - relativedelta(years=LOOKBACK_YEARS)
         df     = df.loc[cutoff:final_end]
+        print(f"current df -> {df}")
 
     series = df['return'].astype(float)
-    scores[ticker] = rlssa_score(series, L, q)
+    scores[ticker] = compute_rlssa(series, L, q)
 
 # --- Rank & select ---
 final_scores  = pd.Series(scores, name="RLSSA_Score").to_frame()
