@@ -24,9 +24,9 @@ USE_EWMA_SCALE  = True
 EWMA_LAMBDA     = 0.94          # monthly decay; alpha = 1 - lambda
 MIN_OBS_FOR_VOL = 12            # min months needed to compute EWMA
 
-ENTRY_COST      = 0.005         # entry cost only
+ENTRY_COST      = 0.0025         # entry cost only
 START_VALUE     = 1000.0
-PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
+PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
 VOLUME_THRESHOLD = 1000
 DEBUG_DATE       = datetime(2016, 1, 1)
@@ -364,7 +364,7 @@ plt.title(f'SSA {NUM_SELECT} {MODE} Portfolio — {scale_tag} scaling — LB {LO
 plt.legend(); plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-plt.show()
+#plt.show()
 
-#save_path = output_dir / title_str
-#plt.savefig(save_path, dpi=300)
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)

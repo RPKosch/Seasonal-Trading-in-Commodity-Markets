@@ -24,7 +24,7 @@ USE_EWMA_SCALE  = True               # required by your spec; keep toggle for fl
 EWMA_LAMBDA     = 0.94               # monthly lambda; alpha = 1 - lambda
 MIN_OBS_FOR_VOL = 12                 # minimum months for EWMA vol
 
-ENTRY_COST      = 0.005             # apply at month entry when positions exist
+ENTRY_COST      = 0.0025             # apply at month entry when positions exist
 START_VALUE     = 1000.0
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
@@ -446,7 +446,7 @@ plt.title(f'RLSSA {NUM_SELECT} {MODE} Portfolio — {scale_tag} scaling — LB {
 plt.legend(); plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-plt.show()
+#plt.show()
 
-# save_path = output_dir / title_str
-# plt.savefig(save_path, dpi=300)
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)

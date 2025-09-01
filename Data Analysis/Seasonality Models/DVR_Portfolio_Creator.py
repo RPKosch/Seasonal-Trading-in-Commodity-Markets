@@ -17,12 +17,12 @@ LOOKBACK_YEARS  = 10   # only used to build SSA history
 FINAL_END       = datetime(2024, 12, 31)
 
 START_VALUE      = 1000.0
-ENTRY_COST       = 0.005
+ENTRY_COST       = 0.0025
 LOOKBACK_YEARS   = 10      # or None for full history
 NUM_SELECT       = 1
-STRICT_SEL       = False
-MODE             = "Short"   # "Long", "Short", or "LongShort"
-SIG_LEVEL        = 1
+STRICT_SEL       = True
+MODE             = "Long"   # "Long", "Short", or "LongShort"
+SIG_LEVEL        = 0.05
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
@@ -404,7 +404,7 @@ plt.legend()
 plt.grid(True)
 plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
-plt.show()
+#plt.show()
 
-#save_path = output_dir / title_str
-#plt.savefig(save_path, dpi=300)
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
