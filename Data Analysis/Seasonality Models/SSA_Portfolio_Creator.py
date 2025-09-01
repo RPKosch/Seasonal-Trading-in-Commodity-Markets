@@ -13,14 +13,14 @@ START_DATE      = datetime(2001, 1, 1)
 LOOKBACK_YEARS  = 10
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 1
+NUM_SELECT      = 2
 MODE            = "LongShort"   # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
 
 # EWMA vol-scaling for ranking
-USE_EWMA_SCALE  = True
+USE_EWMA_SCALE  = False
 EWMA_LAMBDA     = 0.94          # monthly decay; alpha = 1 - lambda
 MIN_OBS_FOR_VOL = 12            # min months needed to compute EWMA
 
@@ -297,7 +297,6 @@ print(f"\nTotal return for {len(records)} months: {tot_return-1:.2%}")
 # ---------------------------------------------------------------------
 vc_nc = vc_wc = START_VALUE
 dates, nc, wc, overall_return, cur_return = [], [], [], [], []
-Overall_Return = 1.0
 
 for rec in records:
     fc = rec['forecast']
@@ -307,39 +306,56 @@ for rec in records:
     daily = rec['daily_dfs']
     if not daily:
         d = (fc) + pd.offsets.MonthEnd(0)
-        dates += [d]; nc += [vc_nc]; wc += [vc_wc]; overall_return += [Overall_Return]; cur_return += [0.0]
+        dates += [d]; nc += [vc_nc]; wc += [vc_wc]
+        overall_return += [vc_nc / START_VALUE]; cur_return += [0.0]
         continue
 
-    # apply entry cost once, before first day's returns
+    # entry cost once at month start (before first day’s returns)
     vc_wc *= (1 - ENTRY_COST)
 
     all_df = pd.concat([mdf.assign(signal=s) for s, mdf in daily.items()]).sort_values('Date')
-    prevs  = {s: None for s in daily}
+
+    # --- BUY-AND-HOLD WITHIN MONTH (no daily rebalancing) ---
+    prevs   = {s: None for s in daily}
+    n_legs  = len(daily)
+    leg_nc  = {s: vc_nc / n_legs for s in daily}   # allocate capital at month start
+    leg_wc  = {s: vc_wc / n_legs for s in daily}
+
+    prev_port_nc = vc_nc
+    prev_port_wc = vc_wc
 
     for d, grp in all_df.groupby('Date'):
-        rs = 0.0
         for r in grp.itertuples():
-            sig = r.signal
-            prev = prevs[sig]
+            sig   = r.signal
+            prev  = prevs[sig]
             close = r.close
             if prev is None:
-                open_ = r.open
+                open_  = r.open
                 r_long = (close / open_) - 1.0
             else:
                 r_long = (close / prev) - 1.0
 
-            step_ret = (1.0 / (1.0 + r_long) - 1.0) if sig.startswith('-') else r_long
-            rs += step_ret / len(daily)
+            step_ret = (1.0/(1.0 + r_long) - 1.0) if sig.startswith('-') else r_long
+
+            # update leg values (no cross-leg rebal)
+            leg_nc[sig] *= (1.0 + step_ret)
+            leg_wc[sig] *= (1.0 + step_ret)
             prevs[sig] = close
 
-        vc_nc *= (1 + rs)
-        vc_wc *= (1 + rs)
-        Overall_Return *= (1 + rs)
+        # portfolio marks each day
+        new_vc_nc = sum(leg_nc.values())
+        new_vc_wc = sum(leg_wc.values())
+
+        rs_nc = new_vc_nc / prev_port_nc - 1.0
+        prev_port_nc = new_vc_nc
+        prev_port_wc = new_vc_wc
+        vc_nc, vc_wc = new_vc_nc, new_vc_wc
+
         dates.append(d)
         nc.append(vc_nc)
         wc.append(vc_wc)
-        overall_return.append(Overall_Return)
-        cur_return.append(rs)
+        overall_return.append(vc_nc / START_VALUE)
+        cur_return.append(rs_nc)
 
 perf = pd.DataFrame(
     {'Date': dates, 'NoCosts': nc, 'WithCosts': wc,
