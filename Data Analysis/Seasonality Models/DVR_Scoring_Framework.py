@@ -2,11 +2,12 @@ import pandas as pd
 import statsmodels.api as sm
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
+import numpy as np
 
 # ----------------------------
 # User settings
 # ----------------------------
-end_date       = "2020-5-20"
+end_date       = "2020-4-20"
 LOOKBACK_YEARS = 10
 SIGN_LEVEL     = 1
 
@@ -36,6 +37,12 @@ next_month = (end_dt + pd.DateOffset(months=1)).month
 # ----------------------------
 # 3) Build overview
 # ----------------------------
+# --- add this helper near the top (after imports) ---
+def newey_west_lags(T: int) -> int:
+    """Rule of thumb: L = floor(0.75 * T^(1/3)), at least 1."""
+    return max(1, int(np.floor(0.75 * (T ** (1/3)))))
+
+
 rows = []
 for tkr, series in returns.items():
     # restrict to lookback window only
@@ -56,11 +63,12 @@ for tkr, series in returns.items():
     df['month'] = df.index.month
     df['D']     = (df['month'] == next_month).astype(float)
 
-    X     = sm.add_constant(df['D'])
-    y     = df['return']
-    model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags':1})
-    beta  = model.params['D']
-    pval  = model.pvalues['D']
+    X = sm.add_constant(df['D'])
+    y = df['return']
+    L = newey_west_lags(len(df))  # auto-select NW lag based on window length
+    model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags': L})
+    beta = model.params['D']
+    pval = model.pvalues['D']
 
     rows.append({
         'ticker':       tkr,

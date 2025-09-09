@@ -19,15 +19,15 @@ FINAL_END       = datetime(2024, 12, 31)
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 LOOKBACK_YEARS   = 10      # or None for full history
-NUM_SELECT       = 2
+NUM_SELECT       = 1
 STRICT_SEL       = False
-MODE             = "LongShort"   # "Long", "Short", or "LongShort"
+MODE             = "Long"   # "Long", "Short", or "LongShort"
 SIG_LEVEL        = 1
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
 VOLUME_THRESHOLD = 1000
-DEBUG = False
+DEBUG = True
 DEBUG_DATE = datetime(2020, 5, 1) #+ pd.offsets.MonthEnd(0)
 
 # -----------------------------------------------------------------------------
@@ -111,6 +111,9 @@ def find_contract(ticker: str, year: int, month: int):
     _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
     return ticker, best_mdf
 
+def newey_west_lags(T: int) -> int:
+    """Rule of thumb: L = floor(0.75 * T^(1/3)), at least 1."""
+    return max(1, int(np.floor(0.75 * (T ** (1/3)))))
 
 # -----------------------------------------------------------------------------
 # 4) LOAD RETURNS
@@ -149,6 +152,7 @@ initial_lb_end       = (START_DATE + relativedelta(years=LOOKBACK_YEARS)
                         - pd.offsets.MonthEnd(1))
 first_trade_forecast = (initial_lb_end
                         + pd.offsets.MonthBegin(1))
+print(f"first_trade_forecast:  {first_trade_forecast}")
 
 # -----------------------------------------------------------------------------
 # 5) BUILD SELECTION HISTORY VIA DUMMY REGRESSION (WITH avg_m‑BASED RANKING)
@@ -183,8 +187,10 @@ while current <= FINAL_END:
 
         # OLS with Newey–West (HAC) robust standard errors
         X = sm.add_constant(df['D'])
+        L = newey_west_lags(len(df))  # auto-select NW lag based on window length
+        print(f"HUHU LEnght of Newwey : {L} and {len(df)}")
         ols = sm.OLS(df['return'], X)
-        model = ols.fit(cov_type='HAC', cov_kwds={'maxlags': 4})  # adjust lag length as needed
+        model = ols.fit(cov_type='HAC', cov_kwds={'maxlags': L})  # adjust lag length as needed
 
         beta  = model.params['D']
         pval  = model.pvalues['D']
