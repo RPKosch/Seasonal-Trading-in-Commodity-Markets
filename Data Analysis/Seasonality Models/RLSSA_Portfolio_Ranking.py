@@ -3,8 +3,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from scipy.stats import norm
-from decimal import Decimal, getcontext
+from decimal import Decimal
 import scipy.linalg as la
 
 # -----------------------------------------------------------------------------
@@ -12,37 +11,36 @@ import scipy.linalg as la
 # -----------------------------------------------------------------------------
 START_DATE       = datetime(2001, 1, 1)
 LOOKBACK_YEARS   = 10     # for building RLSSA history
-ZCALIB_YEARS     = 5      # 5 yrs for Z‑score calibration
-SIM_YEARS        = 5      # 5 yrs for the actual simulation
+SIM_YEARS        = 5      # years for the test simulation
 FINAL_END        = datetime(2024,12,31)
 DEBUG_MONTH      = None   # e.g. datetime(2023,7,1)
 
-RLSSA_WINDOW       = 12
-RLSSA_COMPS        = 2
-SIG_LEVEL        = 0.05
+RLSSA_WINDOW     = 12
+RLSSA_COMPS      = 2
 START_VALUE      = 1000.0
 
+# Ranking mode: raw RLSSA vs. EWMA-adjusted RLSSA (RLSSA / sigma_EWMA over same 10y slice)
+USE_EWMA_SCALE   = False
+EWMA_LAMBDA      = 0.94     # monthly lambda; alpha = 1 - lambda
+MIN_OBS_FOR_VOL  = 12       # min months for EWMA
+
 # -----------------------------------------------------------------------------
-# 2) DERIVE DATE RANGES
+# 2) DATE RANGES (no split/calibration period)
 # -----------------------------------------------------------------------------
-RLSSA_START        = (START_DATE + relativedelta(years=LOOKBACK_YEARS))
-RLSSA_END          = FINAL_END
+RLSSA_START      = (START_DATE + relativedelta(years=LOOKBACK_YEARS))
+RLSSA_END        = FINAL_END
 
-# Z‑score calibration: 2011-01 → 2016-12
-ZCALIB_START     = START_DATE + relativedelta(years=LOOKBACK_YEARS)
-ZCALIB_END       = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS)- pd.offsets.MonthEnd(1)
+# Test simulation: immediately after lookback, for SIM_YEARS
+TEST_SIM_START   = START_DATE + relativedelta(years=LOOKBACK_YEARS)
+TEST_SIM_END     = TEST_SIM_START + relativedelta(years=SIM_YEARS) - pd.offsets.MonthEnd(1)
 
-# Testing/simulation: 2017-01 → 2021-12
-TEST_SIM_START        = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS)
-TEST_SIM_END          = TEST_SIM_START + relativedelta(years=SIM_YEARS) - pd.offsets.MonthEnd(1)
-
-FINAL_SIM_START        = START_DATE + relativedelta(years=LOOKBACK_YEARS) + relativedelta(years=ZCALIB_YEARS) + relativedelta(years=SIM_YEARS)
-FINAL_SIM_END          = FINAL_END
+# Final simulation: month after test sim ends → FINAL_END
+FINAL_SIM_START  = TEST_SIM_END + pd.offsets.MonthBegin(1)
+FINAL_SIM_END    = FINAL_END
 
 print(f"RLSSA history   : {RLSSA_START.date()} → {RLSSA_END.date()}")
-print(f"Z‑calibration : {ZCALIB_START.date()} → {ZCALIB_END.date()}")
-print(f"Test Simulation    : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
-print(f"Final Simulation    : {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
+print(f"Test Simulation : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
+print(f"Final Simulation: {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
 
 # -----------------------------------------------------------------------------
 # 3) HELPERS
@@ -57,38 +55,62 @@ def load_monthly_returns(root_dir: Path) -> dict[str,pd.Series]:
         out[tkr] = df.set_index('date')['return'].sort_index()
     return out
 
-
 def robust_low_rank(X, q, max_iter=25, eps=1e-7):
     U0, s0, V0t = la.svd(X, full_matrices=False)
-    U = U0[:, :q] * np.sqrt(s0[:q])
-    V = (V0t[:q, :].T) * np.sqrt(s0[:q])
+    r0 = min(q, s0.size)
+    U = U0[:, :r0] * np.sqrt(s0[:r0])
+    V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
     for _ in range(max_iter):
         R = X - U @ V.T
         W = 1.0 / (np.abs(R) + eps)
         Xw = np.sqrt(W) * X
         Uw, sw, Vwt = la.svd(Xw, full_matrices=False)
-        U = Uw[:, :q] * np.sqrt(sw[:q])
-        V = (Vwt[:q, :].T) * np.sqrt(sw[:q])
+        r0 = min(q, sw.size)
+        U = Uw[:, :r0] * np.sqrt(sw[:r0])
+        V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
     return U, V
 
-
 def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
-    N = len(series)
-    if N < L:
+    x = np.asarray(series, dtype=float).ravel()
+    if np.any(~np.isfinite(x)):
+        return np.nan
+    N = x.size
+    if not (1 < L < N) or q < 1:
         return np.nan
     K = N - L + 1
-    X = np.column_stack([series[i:i+L] for i in range(K)])
+    X = np.column_stack([x[i:i+L] for i in range(K)])
     U, V = robust_low_rank(X, q)
-    Xr = U @ V.T
+    S = U @ V.T
+
+    # Hankelize S
     rec = np.zeros(N)
     cnt = np.zeros(N)
     for i in range(L):
         for j in range(K):
-            rec[i+j] += Xr[i, j]
+            rec[i+j] += S[i, j]
             cnt[i+j] += 1
+    if not np.all(cnt > 0):
+        return np.nan
     rec /= cnt
-    return rec[-L:].mean()
 
+    # Recurrent coefficients
+    Uc, sc, Vct = la.svd(S, full_matrices=False)
+    r_eff = int(min(q, sc.size))
+    if r_eff < 1:
+        return np.nan
+    Uc = Uc[:, :r_eff]
+    P_head = Uc[:-1, :]
+    phi    = Uc[-1, :]
+    nu2    = float(np.dot(phi, phi))
+    if 1.0 - nu2 <= 1e-10:
+        return np.nan
+    R = (P_head @ phi) / (1.0 - nu2)   # (a_{L-1},...,a_1)
+    a = R[::-1]
+
+    lags = rec[-1: -L: -1]
+    if lags.size != a.size:
+        return np.nan
+    return float(np.dot(a, lags))
 
 def build_rlssa_history(returns: dict[str,pd.Series]) -> pd.DataFrame:
     dates = pd.date_range(RLSSA_START, RLSSA_END, freq='MS')
@@ -97,45 +119,56 @@ def build_rlssa_history(returns: dict[str,pd.Series]) -> pd.DataFrame:
         lb0 = dt - relativedelta(years=LOOKBACK_YEARS)
         lb1 = dt - relativedelta(months=1)
         for tkr, ser in returns.items():
-            df.at[dt, tkr] = compute_rlssa(
-                ser.loc[lb0:lb1].values,
-                L=RLSSA_WINDOW,
-                q=RLSSA_COMPS
-            )
+            df.at[dt, tkr] = compute_rlssa(ser.loc[lb0:lb1].values, L=RLSSA_WINDOW, q=RLSSA_COMPS)
     return df
 
+def ewma_vol(series: pd.Series, lb0: datetime, lb1: datetime, lam: float, min_obs: int) -> float:
+    """EWMA volatility on monthly *simple* returns over [lb0, lb1]."""
+    win = series.loc[lb0:lb1].dropna()
+    if len(win) < min_obs:
+        return np.nan
+    alpha   = 1.0 - lam
+    ewma_v2 = (win**2).ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+    sigma   = float(np.sqrt(ewma_v2)) if np.isfinite(ewma_v2) else np.nan
+    return sigma if (np.isfinite(sigma) and sigma > 0) else np.nan
 
 def sharpe_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
     if arr.size == 0:
         return np.nan
-    mean, std = arr.mean(), arr.std(ddof=1)
-    return mean/std * np.sqrt(12) if std else np.nan
-
+    std = arr.std(ddof=1)
+    if std == 0:
+        return np.nan
+    return arr.mean() / std * np.sqrt(12)
 
 def sortino_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
     if arr.size == 0:
         return np.nan
-    neg = arr[arr<0]
+    neg = arr[arr < 0]
     if neg.size == 0:
         return np.nan
     return arr.mean() / neg.std(ddof=1) * np.sqrt(12)
-
 
 def calmar_ratio(returns: list[Decimal]) -> float:
     arr = np.array([float(r) for r in returns])
     if arr.size == 0:
         return np.nan
-    cum = np.cumprod(1 + arr)
+    cum  = np.cumprod(1 + arr)
     peak = np.maximum.accumulate(cum)
-    dd = cum/peak - 1
-    mdd = abs(dd.min())
-    years = len(arr)/12
+    dd   = cum/peak - 1
+    mdd  = abs(dd.min())
+    years= len(arr)/12
     if mdd == 0 or years == 0:
         return np.nan
-    cagr = cum[-1]**(1/years) - 1
+    cagr = cum[-1] ** (1/years) - 1
     return cagr / mdd
+
+def gps_harmonic(scores: list[float]) -> float:
+    vals = [s for s in scores if s > 0 and not np.isnan(s)]
+    if len(vals) != 4:
+        return -999
+    return len(vals) / sum(1.0/s for s in vals)
 
 def build_metrics(cum_df, rets_dict):
     rows=[]
@@ -157,73 +190,56 @@ def build_metrics(cum_df, rets_dict):
     df['rank_change']= df.index - df['new_rank']
     return df.sort_index()
 
-# def gps_harmonic(scores: list[float]) -> float:
-#     vals = [s for s in scores if s and not np.isnan(s)]
-#     n = len(vals)
-#     return n/np.sum([1/s for s in vals]) if n else -999
-
-def gps_harmonic(scores: list[float]) -> float:
-    # keep only strictly positive, non‑NaN entries
-    vals = [s for s in scores if s > 0 and not np.isnan(s)]
-    n = len(vals)
-    if  n != 4:
-        return -999
-    return (n / sum(1.0/s for s in vals)) if n else -999
-
 # -----------------------------------------------------------------------------
 # 4) LOAD & PREP
 # -----------------------------------------------------------------------------
 ROOT_DIR     = Path().resolve().parent.parent / "Complete Data"
 log_rets     = load_monthly_returns(ROOT_DIR / "All_Monthly_Log_Return_Data")
 simple_rets  = load_monthly_returns(ROOT_DIR / "All_Monthly_Return_Data")
-rlssa_score    = build_rlssa_history(log_rets)
+rlssa_score  = build_rlssa_history(log_rets)
 tickers      = list(log_rets)
 NUM_T        = len(tickers)
 
 # -----------------------------------------------------------------------------
-# 5) RANK LONG & SHORT EACH MONTH
+# 5) RANK LONG & SHORT EACH MONTH (RLSSA raw or EWMA-adjusted)
 # -----------------------------------------------------------------------------
 long_rank, short_rank = {}, {}
 cur = TEST_SIM_START
 while cur <= RLSSA_END:
-    block = rlssa_score.loc[cur - relativedelta(years=ZCALIB_YEARS):cur - relativedelta(months=1)]
-    mu, sd = block.mean(), block.std(ddof=1)
-    raw = []
+    lb0 = cur - relativedelta(years=LOOKBACK_YEARS)
+    lb1 = cur - relativedelta(months=1)
+
+    # Build (ticker, rlssa_raw, score_for_ranking)
+    raw_list = []
     for t in tickers:
-        sc = rlssa_score.at[cur, t]
-        if pd.isna(sc) or sd[t] == 0:
+        sc = rlssa_score.at[cur, t] if (cur in rlssa_score.index) else np.nan
+        if pd.isna(sc):
             continue
-        z = (sc - mu[t]) / sd[t]
-        p = 2 * (1 - norm.cdf(abs(z)))
-        raw.append((t, sc, z, p))
-    df = pd.DataFrame(raw, columns=['tkr','rlssa','z','p']).set_index('tkr')
+        if USE_EWMA_SCALE:
+            sig = ewma_vol(simple_rets[t], lb0, lb1, EWMA_LAMBDA, MIN_OBS_FOR_VOL)
+            if not np.isfinite(sig):
+                continue
+            score = sc / sig
+        else:
+            score = sc
+        raw_list.append((t, sc, score))
 
-    longs  = sorted(
-        [r for r in raw if r[1]>0 and r[3]<=SIG_LEVEL],
-        key=lambda x: x[1], reverse=True
-    )
-    shorts = sorted(
-        [r for r in raw if r[1]<0 and r[3]<=SIG_LEVEL],
-        key=lambda x: x[1]
-    )
-    restL  = sorted(
-        [r for r in raw if r not in longs],
-        key=lambda x: x[1], reverse=True
-    )
-    restS  = sorted(
-        [r for r in raw if r not in shorts],
-        key=lambda x: x[1]
-    )
+    # Sort for long/short
+    # Longs: highest score first; Shorts: lowest score first
+    ordL = [t for (t, sc, s) in sorted(raw_list, key=lambda x: x[2], reverse=True)]
+    ordS = [t for (t, sc, s) in sorted(raw_list, key=lambda x: x[2])]
 
-    ordL = [t for t,_,_,_ in longs] + [t for t,_,_,_ in restL] + [t for t in tickers if t not in df.index]
-    ordS = [t for t,_,_,_ in shorts] + [t for t,_,_,_ in restS] + [t for t in tickers if t not in df.index]
+    # pad with any missing tickers (keeps full ordering)
+    missing = [t for t in tickers if t not in [x[0] for x in raw_list]]
+    ordL += missing
+    ordS += missing
 
     if DEBUG_MONTH and cur == DEBUG_MONTH:
         print(f"--- DEBUG {cur.date()} ---")
-        print("Calibration block (RLSSA):", block)
-        print(df)
-        print("Long order:", ordL)
-        print("Short order:", ordS)
+        dfdbg = pd.DataFrame(raw_list, columns=['tkr','rlssa','score']).set_index('tkr')
+        print(dfdbg.sort_values('score', ascending=False))
+        print("Long order:", ordL[:10], "…")
+        print("Short order:", ordS[:10], "…")
         print("----------------------")
 
     long_rank[cur]  = ordL
@@ -231,17 +247,17 @@ while cur <= RLSSA_END:
     cur += relativedelta(months=1)
 
 # -----------------------------------------------------------------------------
-# 6) CALIBRATION & HOLDOUT COMPUTATIONS
+# 6) TEST & FINAL SIMULATIONS (no entry costs here)
 # -----------------------------------------------------------------------------
 def compute_cum_and_rets(rankings, direction='long', start_date=None, end_date=None):
     holdings = {r:{} for r in range(1,NUM_T+1)}
     rets     = {r:[] for r in range(1,NUM_T+1)}
     for dt, order in rankings.items():
-        if start_date and dt<start_date: continue
-        if end_date   and dt>end_date:   continue
+        if start_date and dt < start_date: continue
+        if end_date   and dt > end_date:   continue
         for r, t in enumerate(order, start=1):
             holdings[r][dt] = t
-            x = Decimal(str(simple_rets[t].get(dt,0.0)))
+            x = Decimal(str(simple_rets[t].get(dt, 0.0)))
             if direction=='short':
                 x = Decimal(1)/(Decimal(1)+x) - Decimal(1)
             rets[r].append(x)
@@ -254,69 +270,80 @@ def compute_cum_and_rets(rankings, direction='long', start_date=None, end_date=N
         rows.append({'rank':float(r),'cum_ret':v/START_D - Decimal(1)})
     return pd.DataFrame(rows).set_index('rank'), holdings, rets
 
-# Calibration/test period
-calib_long_cum, _, calib_long_rets = compute_cum_and_rets(
+# Test simulation
+test_long_cum, _, test_long_rets = compute_cum_and_rets(
     long_rank, 'long', TEST_SIM_START, TEST_SIM_END
 )
-metrics_long_calib = build_metrics(calib_long_cum, calib_long_rets)
+metrics_long_test = build_metrics(test_long_cum, test_long_rets)
 
-calib_short_cum, _, calib_short_rets = compute_cum_and_rets(
+test_short_cum, _, test_short_rets = compute_cum_and_rets(
     short_rank, 'short', TEST_SIM_START, TEST_SIM_END
 )
-metrics_short_calib = build_metrics(calib_short_cum, calib_short_rets)
+metrics_short_test = build_metrics(test_short_cum, test_short_rets)
 
-# Holdout with original RLSSA ordering
-holdout_long_cum, _, _  = compute_cum_and_rets(
+# Final simulation using original ordering
+final_long_cum, _, _  = compute_cum_and_rets(
     long_rank, 'long', FINAL_SIM_START, FINAL_SIM_END
 )
-holdout_short_cum, _, _ = compute_cum_and_rets(
+final_short_cum, _, _ = compute_cum_and_rets(
     short_rank,'short', FINAL_SIM_START, FINAL_SIM_END
 )
 
 # -----------------------------------------------------------------------------
-# 7) OUTPUT & COMPARISON
+# 7) OUTPUT & COMPARISON (dynamic rank ranges)
 # -----------------------------------------------------------------------------
+def _print_ranked_df(df: pd.DataFrame, label: str):
+    if df is None or df.empty:
+        print(f"\n{label}: (no data)")
+        return
+    dfx = df.copy()
+    try:
+        dfx.index = dfx.index.astype(int)
+    except Exception:
+        pass
+    rmin = int(dfx.index.min()) if len(dfx.index) else 0
+    rmax = int(dfx.index.max()) if len(dfx.index) else 0
+    print(f"\n{label} (ranks {rmin}–{rmax}):")
+    print(dfx.to_string())
+
 print(f"Testing Portfolios for Period {TEST_SIM_START} until {TEST_SIM_END}")
 
-print("\nMetrics for LONG portfolios (ranks 1–17):")
-print(metrics_long_calib.loc[1:17].to_string())
-print("\nMetrics for SHORT portfolios (ranks 1–17):")
-print(metrics_short_calib.loc[1:17].to_string())
+_print_ranked_df(metrics_long_test,  "Metrics for LONG portfolios")
+_print_ranked_df(metrics_short_test, "Metrics for SHORT portfolios")
 print("-------------------------------------------------------------------------------------------------")
 
 print(f"Final Portfolios for Period {FINAL_SIM_START} until {FINAL_SIM_END}")
-print("\nMetrics for LONG portfolios (ranks 1–17):")
-print(holdout_long_cum.loc[1:17].to_string())
-print("\nMetrics for SHORT portfolios (ranks 1–17):")
-print(holdout_short_cum.loc[1:17].to_string())
+_print_ranked_df(final_long_cum,   "Final LONG cumulative returns by rank")
+_print_ranked_df(final_short_cum,  "Final SHORT cumulative returns by rank")
 
-def output_comparison(metrics_calib, orig_cum):
-    print(f"\nTesting Period: {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
-    print(f"Final Simulation: {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
+def output_comparison(metrics_test: pd.DataFrame, final_cum: pd.DataFrame) -> pd.DataFrame:
+    print(f"\nTest Period : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}")
+    print(f"Final Period: {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
     rows=[]
-    for prev_rank, row in metrics_calib.iterrows():
+    for prev_rank, row in metrics_test.iterrows():
         pr = int(prev_rank)
-        nr = (row['new_rank'])
-        new_ret = float(orig_cum.loc[pr, 'cum_ret'])
-        orig_ret  = float(orig_cum.loc[nr, 'cum_ret'])
-        orig_score = float(row['score'])
-        diff = new_ret - orig_ret
+        nr = int(row['new_rank'])
+        now_ret  = float(final_cum.loc[pr, 'cum_ret'])
+        same_ret = float(final_cum.loc[nr, 'cum_ret'])
+        diff     = now_ret - same_ret
         rows.append({
             'prev_rank': pr,
             'new_rank' : nr,
-            'holdout_ret_now': new_ret,
-            'holdout_ret_same_rank_prev' : orig_ret,
-            'difference'       : diff,
-            'score'            :  orig_score
+            'final_ret_now': now_ret,
+            'final_ret_same_rank_prev': same_ret,
+            'difference': diff,
+            'score': float(row['score'])
         })
-    return pd.DataFrame(rows).set_index('new_rank').sort_index()
+    out = pd.DataFrame(rows).set_index('new_rank').sort_index()
+    try:
+        out.index = out.index.astype(int)
+    except Exception:
+        pass
+    return out
 
 print("\nLong RLSSA comparison:")
-print(output_comparison(
-    metrics_long_calib,
-    holdout_long_cum).to_string())
+print(output_comparison(metrics_long_test, final_long_cum).to_string())
 
 print("\nShort RLSSA comparison:")
-print(output_comparison(
-    metrics_short_calib,
-    holdout_short_cum).to_string())
+print(output_comparison(metrics_short_test, final_short_cum).to_string())
+
