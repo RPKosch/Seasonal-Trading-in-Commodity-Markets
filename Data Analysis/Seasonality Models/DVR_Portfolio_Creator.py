@@ -19,10 +19,10 @@ FINAL_END       = datetime(2024, 12, 31)
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 LOOKBACK_YEARS   = 10      # or None for full history
-NUM_SELECT       = 1
-STRICT_SEL       = True
-MODE             = "Long"   # "Long", "Short", or "LongShort"
-SIG_LEVEL        = 0.05
+NUM_SELECT       = 2
+STRICT_SEL       = False
+MODE             = "LongShort"   # "Long", "Short", or "LongShort"
+SIG_LEVEL        = 1
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
@@ -181,10 +181,11 @@ while current <= FINAL_END:
         df['month'] = df.index.month
         df['D']     = (df['month'] == nm).astype(float)
 
-        # OLS + HAC(1)
-        X     = sm.add_constant(df['D'])
-        model = sm.OLS(df['return'], X).fit(cov_type='HAC',
-                                            cov_kwds={'maxlags':1})
+        # OLS with Newey–West (HAC) robust standard errors
+        X = sm.add_constant(df['D'])
+        ols = sm.OLS(df['return'], X)
+        model = ols.fit(cov_type='HAC', cov_kwds={'maxlags': 4})  # adjust lag length as needed
+
         beta  = model.params['D']
         pval  = model.pvalues['D']
         avg_m = df.loc[df['month'] == nm, 'return'].mean()
