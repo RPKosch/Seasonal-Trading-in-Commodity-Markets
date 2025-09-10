@@ -92,40 +92,84 @@ def calmar_ratio(returns: list[Decimal]) -> float:
     cagr = cum[-1] ** (1 / years) - 1
     return cagr / mdd
 
+# === ADD: Normalization helpers for GPS =====================================
 
-def gps_harmonic(scores: list[float]) -> float:
-    """Simple GPS-like harmonic aggregation over [cum, Sharpe, Sortino, Calmar].
-       Requires all 4 strictly positive and non-NaN; else returns sentinel -999."""
-    vals = [s for s in scores if (s is not None) and (not np.isnan(s)) and (s > 0)]
-    if len(vals) != 4:
-        return -999
-    return len(vals) / sum(1.0 / s for s in vals)
+def minmax_01(arr_like) -> np.ndarray:
+    """
+    Min–max to [0,1] per column/vector. NaNs are preserved.
+    If all finite values are equal, return 1.0 (do not penalize constant columns).
+    """
+    x = np.asarray(arr_like, dtype=float)
+    mask = np.isfinite(x)
+    if not mask.any():
+        return np.full_like(x, np.nan, dtype=float)
+    xmin = np.nanmin(x[mask]); xmax = np.nanmax(x[mask])
+    if xmax == xmin:
+        out = np.full_like(x, np.nan, dtype=float)
+        out[mask] = 1.0
+        return out
+    out = (x - xmin) / (xmax - xmin)
+    out[~mask] = np.nan
+    return np.clip(out, 0.0, 1.0)
+
+
+def gps_harmonic_01(vals: list[float] | np.ndarray) -> float:
+    """
+    Harmonic mean over values already scaled to (0,1].
+    If any value is 0, GPS = 0 (harmonic mean property). If any NaN -> NaN.
+    """
+    v = np.asarray(vals, dtype=float)
+    if np.isnan(v).any():
+        return np.nan
+    if np.any(v < 0):
+        return np.nan
+    if np.any(v == 0.0):
+        return 0.0
+    return len(v) / np.sum(1.0 / v)
+
 
 
 def build_metrics(cum_df: pd.DataFrame, rets_dict: dict[int, list[Decimal]]) -> pd.DataFrame:
     """Build metrics per rank using NO-COST monthly returns for SR/Sortino/Calmar.
-       cum_df contains 'cum_ret' (no-cost) and 'cum_ret_wc' (with-cost)."""
+       cum_df contains 'cum_ret' (no-cost) and 'cum_ret_wc' (with-cost).
+       Then min–max each metric column to [0,1] across ranks and compute GPS harmonic.
+    """
     rows = []
     for prev_rank, cum_row in cum_df.iterrows():
         rets = rets_dict.get(prev_rank, [])
         sr  = sharpe_ratio(rets)
         sor = sortino_ratio(rets)
         cr  = calmar_ratio(rets)
-        cum = float(cum_row['cum_ret'])
-        score = gps_harmonic([cum, sr, sor, cr])
+        cum = float(cum_row['cum_ret'])  # can be negative; we will normalize later
+
         rows.append({
-            'prev_rank': prev_rank,
-            'cum_ret':   cum,                          # no-cost cumulative
-            'cum_ret_wc': float(cum_row['cum_ret_wc']),# with-cost cumulative
-            'sharpe':    sr,
-            'sortino':   sor,
-            'calmar':    cr,
-            'score':     score
+            'prev_rank':  prev_rank,
+            'cum_ret':    cum,                          # no-cost cumulative
+            'cum_ret_wc': float(cum_row['cum_ret_wc']), # with-cost cumulative
+            'sharpe':     sr,
+            'sortino':    sor,
+            'calmar':     cr,
         })
-    df = pd.DataFrame(rows).set_index('prev_rank')
+
+    df = pd.DataFrame(rows).set_index('prev_rank').sort_index()
+
+    # --- Normalize each metric column to [0,1] across ranks (column-wise) ---
+    base_cols = ['cum_ret', 'sharpe', 'sortino', 'calmar']
+    for c in base_cols:
+        df[f'{c}_01'] = minmax_01(df[c].values)
+
+    # --- GPS harmonic on normalized columns ---
+    norm_cols = [f'{c}_01' for c in base_cols]
+    df['score'] = [
+        gps_harmonic_01(df.loc[idx, norm_cols].values)
+        for idx in df.index
+    ]
+
+    # --- Ranks based on GPS score (higher is better) ---
     df['new_rank']    = df['score'].rank(ascending=False, method='first')
     df['rank_change'] = df.index - df['new_rank']
-    return df.sort_index()
+
+    return df
 
 
 def compute_cum(rankings: dict[pd.Timestamp, list[str]],
