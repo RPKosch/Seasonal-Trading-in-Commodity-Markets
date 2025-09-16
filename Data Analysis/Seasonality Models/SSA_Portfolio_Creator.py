@@ -13,8 +13,8 @@ START_DATE      = datetime(2001, 1, 1)
 LOOKBACK_YEARS  = 10
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 2
-MODE            = "LongShort"   # "Long", "Short", or "LongShort"
+NUM_SELECT      = 1
+MODE            = "Long"   # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2
@@ -26,7 +26,7 @@ MIN_OBS_FOR_VOL = 12            # min months needed to compute EWMA
 
 ENTRY_COST      = 0.0025         # entry cost only
 START_VALUE     = 1000.0
-PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
+PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
 VOLUME_THRESHOLD = 1000
 DEBUG_DATE       = datetime(2016, 1, 1)
@@ -372,6 +372,7 @@ scale_tag = "EWMA94" if USE_EWMA_SCALE else "RAW"
 title_str = f"SSA_{scale_tag}_{MODE}_Portfolio_{NUM_SELECT}_LB_{LOOKBACK_YEARS}Y.png"
 
 output_dir = Path("plots/SSA_Plots"); output_dir.mkdir(exist_ok=True)
+output_dir = Path("plots/Additional_Plots"); output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
 plt.plot(perf.index, perf['NoCosts'],  label=f'No Costs (Total: {tot_nc:.2f}%)')
