@@ -13,14 +13,14 @@ START_DATE      = datetime(2001, 1, 1)
 LOOKBACK_YEARS  = 10                 # rolling history for RLSSA & EWMA vol
 FINAL_END       = datetime(2024, 12, 31)
 
-NUM_SELECT      = 2
-MODE            = "LongShort"            # "Long", "Short", or "LongShort"
+NUM_SELECT      = 1
+MODE            = "Short"            # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2                  # robust rank (q)
 
 # EWMA volatility on monthly *simple* returns over the same 10y slice
-USE_EWMA_SCALE  = False               # required by your spec; keep toggle for flexibility
+USE_EWMA_SCALE  = True               # required by your spec; keep toggle for flexibility
 EWMA_LAMBDA     = 0.94               # monthly lambda; alpha = 1 - lambda
 MIN_OBS_FOR_VOL = 12                 # minimum months for EWMA vol
 
@@ -83,7 +83,7 @@ def compute_rlssa(series: np.ndarray, L: int, q: int) -> float:
       2) Robust low-rank S ≈ U V^T (rank q)
       3) Hankelize S -> robust fitted rec (length N)
       4) SVD(S) -> Uc; build recurrent coefficients a from Uc
-      5) Forecast \hat y_{N+1} = sum a_j * rec[N+1-j], j=1..L-1
+      5) Forecast y_{N+1} = sum a_j * rec[N+1-j], j=1..L-1
     Returns scalar forecast or np.nan on failure.
     """
     x = np.asarray(series, dtype=float).ravel()

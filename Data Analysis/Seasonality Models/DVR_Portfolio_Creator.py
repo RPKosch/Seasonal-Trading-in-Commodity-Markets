@@ -19,10 +19,10 @@ FINAL_END       = datetime(2024, 12, 31)
 START_VALUE      = 1000.0
 ENTRY_COST       = 0.0025
 LOOKBACK_YEARS   = 10      # or None for full history
-NUM_SELECT       = 1
-STRICT_SEL       = False
-MODE             = "Long"   # "Long", "Short", or "LongShort"
-SIG_LEVEL        = 1
+NUM_SELECT       = 2
+STRICT_SEL       = True
+MODE             = "LongShort"   # "Long", "Short", or "LongShort"
+SIG_LEVEL        = 0.05
 
 PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
 
@@ -167,7 +167,6 @@ while current <= FINAL_END:
         # OLS with Newey–West (HAC) robust standard errors
         X = sm.add_constant(df['D'])
         L = newey_west_lags(len(df))  # auto-select NW lag based on window length
-        print(f"HUHU LEnght of Newwey : {L} and {len(df)}")
         ols = sm.OLS(df['return'], X)
         model = ols.fit(cov_type='HAC', cov_kwds={'maxlags': L})  # adjust lag length as needed
 
