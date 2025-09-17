@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 # -----------------------------------------------------------------------------
 # === CONFIGURATION ===
 # -----------------------------------------------------------------------------
-USE_LOG_RETURNS   = True
+USE_LOG_RETURNS   = False
 VOLUME_THRESHOLD  = 1000  # min in-month volume required for a contract to be usable
 
 LOST_TICKERS = ["PA", "PL"]
@@ -70,8 +70,8 @@ def find_contract(tkr: str, y: int, m: int, root: Path):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        # Must trade through month-end + 15 days
-        if df["Date"].max() < mend:
+        # Must trade through month-end + 14 days
+        if df["Date"].max() < mend + timedelta(days=14):
             continue
 
         # In-month slice

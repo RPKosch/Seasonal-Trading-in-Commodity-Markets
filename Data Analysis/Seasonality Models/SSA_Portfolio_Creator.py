@@ -142,7 +142,7 @@ def find_contract(ticker: str, year: int, month: int):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        if df["Date"].max() < mend: continue
+        if df["Date"].max() < mend + timedelta(days=14): continue
 
         mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
         if mdf.empty: continue
