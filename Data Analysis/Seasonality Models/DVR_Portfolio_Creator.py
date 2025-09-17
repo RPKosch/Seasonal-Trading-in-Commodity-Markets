@@ -34,29 +34,25 @@ DEBUG_DATE = datetime(2020, 5, 1) #+ pd.offsets.MonthEnd(0)
 # 3) CONTRACT‑FINDER
 # -----------------------------------------------------------------------------
 def find_contract(ticker: str, year: int, month: int):
-    root    = Path().resolve().parent.parent / "Complete Data" / f"{ticker}_Historic_Data"
+    ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
+    root    = ROOT_DIR / f"{ticker}_Historic_Data"
     m0      = datetime(year, month, 1)
     mend    = m0 + relativedelta(months=1) - timedelta(days=1)
     pattern = re.compile(rf"^{ticker}[_-](\d{{4}})-(\d{{2}})\.csv$")
 
     candidates = []
     earliest_first_date = None
-
     if not root.exists():
         print(f"  ✖ {year}-{month:02d} {ticker}: directory not found: {root}")
         return None, None
 
     for p in root.iterdir():
-        if not p.is_file():
-            continue
+        if not p.is_file(): continue
         mobj = pattern.match(p.name)
-        if not mobj:
-            continue
-
+        if not mobj: continue
         fy, fm = int(mobj.group(1)), int(mobj.group(2))
         lag = (fy - year) * 12 + (fm - month)
-        if lag < 2:
-            continue
+        if lag < 2: continue
 
         try:
             df = pd.read_csv(p, parse_dates=["Date"])
@@ -69,46 +65,29 @@ def find_contract(ticker: str, year: int, month: int):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        # Must trade through month-end + 15 days
-        if df["Date"].max() < mend + timedelta(days=15):
-            continue
+        if df["Date"].max() < mend: continue
 
-        # In-month slice
         mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
-        if mdf.empty:
-            continue
+        if mdf.empty: continue
 
-        # Volume checks
         if "volume" not in mdf.columns:
-            print(f"  • rejected {year}-{month:02d} {ticker} file {p.name}: no 'volume' column.")
+            print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: no 'volume'.")
             continue
 
         vol = pd.to_numeric(mdf["volume"], errors="coerce")
         avg_vol = float(vol.mean(skipna=True))
-        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD:
-            # Uncomment if you want verbose reason:
-            # print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: avg vol {avg_vol:.0f} < {VOLUME_THRESHOLD}.")
-            continue
+        if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD: continue
 
-        # Candidate accepted (sort by date for consistent first/last rows)
         candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
 
     if not candidates:
         if earliest_first_date is not None and earliest_first_date > mend:
-            print(
-                f"  ✖ {year}-{month:02d} {ticker}: No usable contract — "
-                f"earliest file starts {earliest_first_date.date()} > month-end {mend.date()}."
-            )
+            print(f"  ✖ {year}-{month:02d} {ticker}: earliest file {earliest_first_date.date()} > month-end.")
         else:
-            print(
-                f"  ✖ {year}-{month:02d} {ticker}: No contract met criteria "
-                f"(lag≥2, trades through {(mend + timedelta(days=15)).date()}, "
-                f"in-month data, avg volume≥{VOLUME_THRESHOLD})."
-            )
+            print(f"  ✖ {year}-{month:02d} {ticker}: no contract met criteria.")
         return None, None
 
-    # Pick the closest acceptable front-month
-    _, best_mdf, best_name, avg_vol = min(candidates, key=lambda x: x[0])
+    _, best_mdf, _, _ = min(candidates, key=lambda x: x[0])
     return ticker, best_mdf
 
 def newey_west_lags(T: int) -> int:

@@ -71,7 +71,7 @@ def find_contract(tkr: str, y: int, m: int, root: Path):
                 earliest_first_date = fmin
 
         # Must trade through month-end + 15 days
-        if df["Date"].max() < mend + timedelta(days=15):
+        if df["Date"].max() < mend:
             continue
 
         # In-month slice

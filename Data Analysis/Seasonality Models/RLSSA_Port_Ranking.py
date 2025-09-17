@@ -365,7 +365,7 @@ def find_contract(ticker: str, year: int, month: int):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        if df["Date"].max() < mend + timedelta(days=15): continue
+        if df["Date"].max() < mend: continue
 
         mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
         if mdf.empty: continue
@@ -374,7 +374,7 @@ def find_contract(ticker: str, year: int, month: int):
             print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: no 'volume'.")
             continue
 
-        vol = pd.to_numeric(mdf["volume"], errors="coerce")   # use mdf here
+        vol = pd.to_numeric(mdf["volume"], errors="coerce")
         avg_vol = float(vol.mean(skipna=True))
         if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD: continue
 

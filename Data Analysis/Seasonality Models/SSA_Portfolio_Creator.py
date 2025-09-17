@@ -111,6 +111,7 @@ def build_ssa_history(returns):
 # 4) CONTRACT FINDER
 # ---------------------------------------------------------------------
 def find_contract(ticker: str, year: int, month: int):
+    ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
     root    = ROOT_DIR / f"{ticker}_Historic_Data"
     m0      = datetime(year, month, 1)
     mend    = m0 + relativedelta(months=1) - timedelta(days=1)
@@ -141,7 +142,7 @@ def find_contract(ticker: str, year: int, month: int):
             if earliest_first_date is None or fmin < earliest_first_date:
                 earliest_first_date = fmin
 
-        if df["Date"].max() < mend + timedelta(days=15): continue
+        if df["Date"].max() < mend: continue
 
         mdf = df[(df["Date"] >= m0) & (df["Date"] <= mend)]
         if mdf.empty: continue
