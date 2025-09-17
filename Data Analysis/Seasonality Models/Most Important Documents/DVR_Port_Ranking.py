@@ -22,7 +22,7 @@ START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025     # apply ONCE at month start in invested months
 
 # DVR params
-SIG_LEVEL               = 0.05        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
+SIG_LEVEL               = 1        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
 
 # GPS switches
 GPS_ROLLING_ENABLED     = True       # True = rolling 5y monthly re-calibration; False = fixed first 5y before FINAL_SIM_START
@@ -202,43 +202,25 @@ def _rank_greedy(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
 
 def _rank_sig_first(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
     """
-    Significance-first ranking that respects the user-chosen p-value threshold (sig_level).
-
-    Logic:
-      • Build 'eligible' buckets using (p <= sig_level) and beta sign.
-      • Sort eligible longs by beta desc, eligible shorts by beta asc.
-      • Put all remaining names (the 'rest') after the eligible bucket,
-        sorted the same way by beta for the relevant side.
-      • Return full-universe orders (no names dropped).
+    SIG<1: enforce significance priority with a single stable sort:
+      LONGS  : (pos=z>0) first → (elig) first → z desc
+      SHORTS : (neg=z<0) first → (elig) first → z asc (more negative better)
+    This guarantees a different order whenever eligibility differs.
     """
-    # Defensive copy and clean NaNs
-    df = dfm.copy()
-    df = df[np.isfinite(df['beta']) & np.isfinite(df['pval'])]
-    if df.empty:
-        return [], []
+    dfm = dfm.copy()
+    dfm['pos'] = dfm['z'] > 0
+    dfm['neg'] = dfm['z'] < 0
+    dfm['elig'] = dfm['elig'].astype(bool)
 
-    # Eligible sets by sign and p-value
-    elig_long  = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] > 0)]
-    elig_short = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] < 0)]
-
-    # Rest = universe minus eligible by side
-    rest_long  = df.loc[~df.index.isin(elig_long.index)]
-    rest_short = df.loc[~df.index.isin(elig_short.index)]
-
-    # Sort rules
-    # Longs: more positive beta is better
-    elig_long  = elig_long.sort_values('beta', ascending=False)
-    rest_long  = rest_long.sort_values('beta', ascending=False)
-
-    # Shorts: more negative beta is better
-    elig_short = elig_short.sort_values('beta', ascending=True)
-    rest_short = rest_short.sort_values('beta', ascending=True)
-
-    orderL = elig_long.index.tolist()  + [t for t in rest_long.index.tolist()  if t not in elig_long.index]
-    orderS = elig_short.index.tolist() + [t for t in rest_short.index.tolist() if t not in elig_short.index]
-
+    orderL = (
+        dfm.sort_values(by=['pos','elig','z'], ascending=[False, False, False])
+           .index.tolist()
+    )
+    orderS = (
+        dfm.sort_values(by=['neg','elig','z'], ascending=[False, False, True])
+           .index.tolist()
+    )
     return orderL, orderS
-
 
 cur = TEST_SIM_START
 while cur <= FINAL_END:

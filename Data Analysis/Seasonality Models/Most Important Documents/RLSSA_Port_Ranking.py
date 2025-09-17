@@ -1,7 +1,6 @@
 import re
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from pathlib import Path
@@ -21,11 +20,17 @@ SIM_YEARS               = 5          # printed diagnostics only
 START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025     # apply ONCE at month start in invested months
 
-# DVR params
-SIG_LEVEL               = 0.05        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
+# RLSSA params
+SSA_WINDOW              = 12          # embedding dimension L
+SSA_COMPS               = 2           # robust rank q
+
+# Optional EWMA vol scaling of RLSSA score (score / sigma)
+USE_EWMA_SCALE          = True
+EWMA_LAMBDA             = 0.94        # alpha = 1 - lambda
+MIN_OBS_FOR_VOL         = 12
 
 # GPS switches
-GPS_ROLLING_ENABLED     = True       # True = rolling 5y monthly re-calibration; False = fixed first 5y before FINAL_SIM_START
+GPS_ROLLING_ENABLED     = True        # True = rolling 5y monthly re-calibration; False = fixed first 5y before FINAL_SIM_START
 GPS_CALIB_YEARS         = SIM_YEARS
 
 # Plot window (clip to what you want to see)
@@ -143,112 +148,122 @@ def build_metrics(cum_df: pd.DataFrame, rets_dict: dict[int, list[Decimal]]) -> 
     df['rank_change'] = df.index - df['new_rank']
     return df
 
-# ---------- DVR core (Z-score ranking, no EWMA) ----------
-def newey_west_lags(T: int) -> int:
-    """Rule of thumb: L = floor(0.75 * T^(1/3)), at least 1."""
-    return max(1, int(np.floor(0.75 * (T ** (1/3)))))
-
-def dvr_stats(monthly_series: pd.Series, forecast_month: pd.Timestamp,
-              lookback_years: int | None) -> tuple[float, float, float]:
+# ---------- RLSSA core ----------
+def robust_low_rank(X: np.ndarray, q: int, max_iter: int = 25, eps: float = 1e-7):
     """
-    For the target forecast month, run OLS with a dummy for that calendar month
-    over the lookback window. Return (beta, pval, zscore=t-stat).
+    Simple IRLS-style robust low-rank approximation:
+    minimize ~ sum w_ij (X_ij - (UV^T)_ij)^2 with w_ij ≈ 1/(|resid|+eps).
+    Returns U (L×q), V (K×q) such that S ≈ U V^T.
     """
-    nm = forecast_month.month
-    df = monthly_series.loc[:(forecast_month - relativedelta(months=1))].to_frame('return')
-    if lookback_years is not None:
-        cutoff = forecast_month - relativedelta(years=lookback_years)
-        df = df[df.index >= cutoff]
-    if df.empty or df['return'].count() < 12:
-        return (np.nan, np.nan, np.nan)
+    U0, s0, V0t = np.linalg.svd(X, full_matrices=False)
+    r0 = min(q, s0.size)
+    U = U0[:, :r0] * np.sqrt(s0[:r0])
+    V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
 
-    df = df.copy()
-    df['month'] = df.index.month
-    df['D']     = (df['month'] == nm).astype(float)
+    for _ in range(max_iter):
+        R = X - U @ V.T
+        W = 1.0 / (np.abs(R) + eps)
+        Xw = np.sqrt(W) * X
+        Uw, sw, Vwt = np.linalg.svd(Xw, full_matrices=False)
+        r0 = min(q, sw.size)
+        U = Uw[:, :r0] * np.sqrt(sw[:r0])
+        V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
+    return U, V
 
-    X = sm.add_constant(df['D'])
-    L = newey_west_lags(len(df))
-    try:
-        model = sm.OLS(df['return'], X).fit(cov_type='HAC', cov_kwds={'maxlags': L})
-        beta   = float(model.params.get('D', np.nan))
-        pval   = float(model.pvalues.get('D', np.nan))
-        zscore = float(model.tvalues.get('D', np.nan))  # NW t-stat (used as Z)
-    except Exception:
-        beta, pval, zscore = (np.nan, np.nan, np.nan)
+def compute_rlssa_forecast(x: np.ndarray, L: int, q: int) -> float:
+    """
+    RLSSA one-step-ahead forecast. Returns forecast or NaN if not feasible.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    N = len(x)
+    if N < max(L, 3) or L <= 1 or L >= N or q < 1:
+        return np.nan
+    if np.isnan(x).any():
+        return np.nan
 
-    return (beta, pval, zscore)
+    K = N - L + 1
+    # Trajectory matrix
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # L x K
+
+    # Robust low-rank reconstruction in trajectory space
+    U_r, V_r = robust_low_rank(X, q=q)
+    S = U_r @ V_r.T  # L x K
+
+    # Hankelization to fitted series rec
+    rec = np.zeros(N)
+    cnt = np.zeros(N)
+    for i in range(L):
+        for j in range(K):
+            rec[i + j] += S[i, j]
+            cnt[i + j] += 1.0
+    if not np.all(cnt > 0):
+        return np.nan
+    rec /= cnt
+
+    # Recurrence from classical SVD of S
+    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)
+    r_eff = int(min(q, sc.size))
+    if r_eff < 1:
+        return np.nan
+    Uc = Uc[:, :r_eff]
+
+    P_head = Uc[:-1, :]   # (L-1) x r
+    phi    = Uc[-1, :]    # r
+    nu2    = float(np.dot(phi, phi))
+    if 1.0 - nu2 <= 1e-10:
+        return np.nan
+    R = (P_head @ phi) / (1.0 - nu2)  # (a_{L-1},...,a_1)
+    a = R[::-1]                        # (a_1,...,a_{L-1})
+
+    lags = rec[-1: -L: -1]
+    if lags.size != a.size:
+        return np.nan
+    return float(np.dot(a, lags))
 
 # =============================== #
 # 4) LOAD DATA
 # =============================== #
 base = ROOT_DIR
-# DVR showcase runs on LOG monthly returns; GPS metrics use SIMPLE monthly returns
-log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")
-simple_rets = load_returns(base / "All_Monthly_Return_Data")
+log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")   # RLSSA fit on LOG returns
+simple_rets = load_returns(base / "All_Monthly_Return_Data")       # only for EWMA scaling option
 tickers     = list(log_rets)
 NUM_T       = len(tickers)
 
 # =============================== #
-# 5) DVR-BASED RANKINGS BY MONTH (Z-score)
+# 5) RLSSA-BASED RANKINGS BY MONTH
 # =============================== #
 long_rankings:  dict[pd.Timestamp, list[str]] = {}
 short_rankings: dict[pd.Timestamp, list[str]] = {}
 
-def _rank_greedy(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """SIG>=1: plain greedy by Z (longs: desc; shorts: asc)."""
-    orderL = dfm.sort_values('z', ascending=False).index.tolist()
-    orderS = dfm.sort_values('z', ascending=True ).index.tolist()
-    return orderL, orderS
-
-def _rank_sig_first(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """
-    Significance-first ranking that respects the user-chosen p-value threshold (sig_level).
-
-    Logic:
-      • Build 'eligible' buckets using (p <= sig_level) and beta sign.
-      • Sort eligible longs by beta desc, eligible shorts by beta asc.
-      • Put all remaining names (the 'rest') after the eligible bucket,
-        sorted the same way by beta for the relevant side.
-      • Return full-universe orders (no names dropped).
-    """
-    # Defensive copy and clean NaNs
-    df = dfm.copy()
-    df = df[np.isfinite(df['beta']) & np.isfinite(df['pval'])]
-    if df.empty:
-        return [], []
-
-    # Eligible sets by sign and p-value
-    elig_long  = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] > 0)]
-    elig_short = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] < 0)]
-
-    # Rest = universe minus eligible by side
-    rest_long  = df.loc[~df.index.isin(elig_long.index)]
-    rest_short = df.loc[~df.index.isin(elig_short.index)]
-
-    # Sort rules
-    # Longs: more positive beta is better
-    elig_long  = elig_long.sort_values('beta', ascending=False)
-    rest_long  = rest_long.sort_values('beta', ascending=False)
-
-    # Shorts: more negative beta is better
-    elig_short = elig_short.sort_values('beta', ascending=True)
-    rest_short = rest_short.sort_values('beta', ascending=True)
-
-    orderL = elig_long.index.tolist()  + [t for t in rest_long.index.tolist()  if t not in elig_long.index]
-    orderS = elig_short.index.tolist() + [t for t in rest_short.index.tolist() if t not in elig_short.index]
-
-    return orderL, orderS
-
-
 cur = TEST_SIM_START
 while cur <= FINAL_END:
     stats = []
+    lb0 = cur - relativedelta(years=LOOKBACK_YEARS)
+    lb1 = cur - relativedelta(months=1)
+
     for t in tickers:
-        beta, pval, z = dvr_stats(log_rets[t], cur, LOOKBACK_YEARS)
-        if not np.isfinite(z):
+        s_log = log_rets[t].loc[lb0:lb1].dropna()
+        if len(s_log) < max(SSA_WINDOW, MIN_OBS_FOR_VOL):
             continue
-        elig = (np.isfinite(pval) and (pval <= float(SIG_LEVEL)))
-        stats.append({'ticker': t, 'beta': beta, 'pval': pval, 'z': z, 'elig': elig})
+
+        # RLSSA forecast on log returns
+        rlssa_val = compute_rlssa_forecast(s_log.values, L=SSA_WINDOW, q=SSA_COMPS)
+
+        # Optional EWMA vol scaling on simple returns
+        score = rlssa_val
+        if USE_EWMA_SCALE:
+            s_simple = simple_rets[t].loc[lb0:lb1].dropna()
+            if len(s_simple) >= MIN_OBS_FOR_VOL and np.isfinite(rlssa_val):
+                alpha = 1.0 - EWMA_LAMBDA
+                ewma_var = (s_simple**2).ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+                sigma = float(np.sqrt(ewma_var)) if np.isfinite(ewma_var) else np.nan
+                if sigma and np.isfinite(sigma) and sigma > 0:
+                    score = rlssa_val / sigma
+                else:
+                    score = np.nan
+
+        if np.isfinite(score):
+            stats.append({'ticker': t, 'rlssa': rlssa_val, 'score': score})
 
     if not stats:
         long_rankings[cur]  = tickers.copy()
@@ -256,20 +271,18 @@ while cur <= FINAL_END:
     else:
         dfm = pd.DataFrame(stats).set_index('ticker')
 
-        # --- diagnostics (helps verify difference across SIG settings) ---
-        n_tot  = int(len(dfm))
-        n_elig = int(dfm['elig'].sum())
-        print(f"[{cur.date()}] DVR stats: N={n_tot}, eligible (p <= {SIG_LEVEL}): {n_elig}")
-
-        if float(SIG_LEVEL) >= 0.999999:          # GREEDY mode
-            orderL, orderS = _rank_greedy(dfm)
-        else:                                      # SIGNIFICANCE-FIRST mode
-            orderL, orderS = _rank_sig_first(dfm)
-
-        # Include any missing names at the end (preserve universe)
+        # LONG: score > 0 first (desc), then rest by desc
+        pos  = dfm[dfm['score'] > 0].sort_values('score', ascending=False).index.tolist()
+        rest = dfm.drop(pos, errors='ignore').sort_values('score', ascending=False).index.tolist()
+        orderL = pos + rest
         orderL += [t for t in tickers if t not in orderL]
+        long_rankings[cur] = orderL[:len(tickers)]
+
+        # SHORT: score < 0 first (most negative), then rest by asc
+        neg  = dfm[dfm['score'] < 0].sort_values('score', ascending=True).index.tolist()
+        restS= dfm.drop(neg, errors='ignore').sort_values('score', ascending=True).index.tolist()
+        orderS = neg + restS
         orderS += [t for t in tickers if t not in orderS]
-        long_rankings[cur]  = orderL[:len(tickers)]
         short_rankings[cur] = orderS[:len(tickers)]
 
     cur += relativedelta(months=1)
@@ -361,7 +374,7 @@ def find_contract(ticker: str, year: int, month: int):
             print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: no 'volume'.")
             continue
 
-        vol = pd.to_numeric(mdf["volume"], errors="coerce")
+        vol = pd.to_numeric(mdf["volume"], errors="coerce")   # use mdf here
         avg_vol = float(vol.mean(skipna=True))
         if pd.isna(avg_vol) or avg_vol < VOLUME_THRESHOLD: continue
 
@@ -469,7 +482,7 @@ def simulate_baseline_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
                                       end_dt: pd.Timestamp,
                                       entry_cost: float) -> pd.DataFrame:
     """
-    Daily WITH-COST NAV paths for portfolios 1..NUM_T using identity mapping (baseline DVR order).
+    Daily WITH-COST NAV paths for portfolios 1..NUM_T using identity mapping (baseline RLSSA order).
     Index = daily trading dates we actually observe. Includes an initial anchor at start_dt.
     """
     nav = {k: Decimal(str(START_VALUE)) for k in range(1, NUM_T + 1)}
@@ -561,9 +574,9 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
 # =============================== #
 print("-" * 100)
 print(f"Apply Period: {FINAL_SIM_START.date()} -> {FINAL_SIM_END.date()}")
-print(f"GPS monthly mapping (DVR prev-ranks): rolling={GPS_ROLLING_ENABLED}, window={GPS_CALIB_YEARS}y")
+print(f"GPS monthly mapping (RLSSA prev-ranks): rolling={GPS_ROLLING_ENABLED}, window={GPS_CALIB_YEARS}y")
 print(f"Entry cost applied once per month: {ENTRY_COST}")
-print(f"DVR ranking: Z-score (Newey–West t-stat), p eligibility <= {SIG_LEVEL}")
+print(f"RLSSA params: L={SSA_WINDOW}, rank={SSA_COMPS}, EWMA_scale={USE_EWMA_SCALE}")
 
 # Daily WITH-COST monthly-invest-but-daily-compound NAVs
 long_baseline_nav_daily  = simulate_baseline_nav_paths_daily(long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST)
@@ -575,7 +588,7 @@ short_gps_nav_daily = simulate_gps_nav_paths_daily(short_rankings, 'short', FINA
                                                    GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST)
 
 # Output dirs
-out_root = Path().resolve() / "Outputs" / f"DVR_SIG={SIG_LEVEL}_vs_GPS_ROLLING={GPS_ROLLING_ENABLED}"
+out_root = Path().resolve() / "Outputs" / f"RLSSA_EWMA={USE_EWMA_SCALE}_vs_GPS_ROLLING={GPS_ROLLING_ENABLED}"
 plot_dir_long  = out_root / "plots" / "LONG"
 plot_dir_short = out_root / "plots" / "SHORT"
 for p in [plot_dir_long, plot_dir_short]:
@@ -592,8 +605,8 @@ def _clip_plot_range(df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> 
 
 def plot_pair_series(dates, y1, y2, title, ylabel, save_path):
     plt.figure(figsize=(10,6))
-    plt.plot(dates, y1, label='Baseline (DVR only) - With Costs')
-    plt.plot(dates, y2, label='GPS-mapped (DVR) - With Costs')
+    plt.plot(dates, y1, label='Baseline (RLSSA only) - With Costs')
+    plt.plot(dates, y2, label='GPS-mapped (RLSSA) - With Costs')
     plt.xlabel('Date')
     plt.ylabel(ylabel)
     plt.title(title)
