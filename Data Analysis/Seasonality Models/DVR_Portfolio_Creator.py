@@ -347,13 +347,63 @@ for rec in records:
         overall_return.append(Overall_Return)
         cur_return.append(rs)
 
+def save_daily_nav_and_returns(
+    perf: pd.DataFrame,
+    out_dir: Path,
+    base_name: str,
+    start_value: float = 1000.0
+) -> None:
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Work on a sorted copy
+    df = perf.copy().sort_index()
+    if df.index.name is None:
+        df.index.name = "Date"
+
+    if df.empty:
+        raise ValueError("perf is empty; nothing to save.")
+
+    # Insert anchor baseline row one day BEFORE the first recorded date
+    first_date = pd.to_datetime(df.index.min())
+    anchor_date = first_date - pd.Timedelta(days=1)
+    anchor = pd.DataFrame(
+        {"NoCosts": [start_value], "WithCosts": [start_value]},
+        index=[anchor_date]
+    )
+
+    # Keep only the columns we need for the NAVs, then add anchor
+    need_cols = [c for c in ["NoCosts", "WithCosts"] if c in df.columns]
+    df_nav = pd.concat([anchor, df[need_cols]], axis=0).sort_index()
+
+    # Build output table with required columns
+    out = pd.DataFrame(index=df_nav.index)
+    out.index.name = "Date"
+
+    # NAV values
+    out["NC_Value"] = df_nav["NoCosts"]
+    out["WC_Value"] = df_nav["WithCosts"]
+
+    # Daily (simple) returns from NAVs
+    out["Cur_Ret_NC"] = out["NC_Value"].pct_change().fillna(0.0)
+    out["Cur_Ret_WC"] = out["WC_Value"].pct_change().fillna(0.0)
+
+    # Cumulative total returns vs. baseline
+    out["Tot_Ret_NC"] = (out["NC_Value"] / float(start_value)) - 1.0
+    out["Tot_Ret_WC"] = (out["WC_Value"] / float(start_value)) - 1.0
+
+    # Final column order & save
+    out = out[["NC_Value", "Cur_Ret_NC", "Tot_Ret_NC",
+               "WC_Value", "Cur_Ret_WC", "Tot_Ret_WC"]].reset_index()
+
+    out_path = out_dir / f"{base_name}_daily_full.csv"
+    out.to_csv(out_path, index=False)
+    print(f"Saved daily NAVs + returns → {out_path}")
 
 print(len(dates), len(nc), len(wc), len(overall_return), len(cur_return))
 
 perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc, 'Tot_Return': overall_return, 'cur_return': cur_return})\
            .set_index('Date')
-#perf = pd.DataFrame({'Date':dates,'NoCosts':nc,'WithCosts':wc})\
-#           .set_index('Date')
 
 if (DEBUG):
     print(perf.to_string(index=True))
@@ -391,5 +441,11 @@ plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
 #plt.show()
 
-save_path = output_dir / title_str
-plt.savefig(save_path, dpi=300)
+#save_path = output_dir / title_str
+#plt.savefig(save_path, dpi=300)
+
+# --- export daily CSVs in a separate folder ---
+csv_out_dir = output_dir / "DVR_Daily"
+# reuse plot name without extension as a base name
+base_name = f"DVR_{MODE}_Portfolio_{NUM_SELECT}_A_&_LB_{LOOKBACK_YEARS}Y_SL_{SIG_LEVEL}_SS_{STRICT_SEL}"
+save_daily_nav_and_returns(perf, csv_out_dir, base_name)
