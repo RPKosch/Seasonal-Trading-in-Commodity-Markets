@@ -25,7 +25,7 @@ SSA_WINDOW              = 12          # embedding dimension L
 SSA_COMPS               = 2           # leading components to keep
 
 # Optional EWMA vol scaling of SSA score (score / sigma)
-USE_EWMA_SCALE          = True
+USE_EWMA_SCALE          = False
 EWMA_LAMBDA             = 0.94        # alpha = 1 - lambda
 MIN_OBS_FOR_VOL         = 12
 
@@ -126,20 +126,20 @@ def gps_harmonic_01(vals: list[float] | np.ndarray) -> float:
 
 def build_metrics(cum_df: pd.DataFrame, rets_dict: dict[int, list[Decimal]]) -> pd.DataFrame:
     """
-    GPS score across ranks based on cum_ret, sharpe, sortino, calmar (NO-COST for metrics).
+    GPS score across ranks based on seasonality (SSA score), sharpe, sortino, calmar.
+    'seasonality' is already directional (long uses +score, short uses -score) and averaged within the window.
     """
     rows = []
     for prev_rank, cum_row in cum_df.iterrows():
         rows.append({
-            'prev_rank':  prev_rank,
-            'cum_ret':    float(cum_row['cum_ret']),
-            'cum_ret_wc': float(cum_row['cum_ret_wc']),
-            'sharpe':     sharpe_ratio(rets_dict.get(prev_rank, [])),
-            'sortino':    sortino_ratio(rets_dict.get(prev_rank, [])),
-            'calmar':     calmar_ratio(rets_dict.get(prev_rank, [])),
+            'prev_rank':   prev_rank,
+            'seasonality': float(cum_row.get('seasonality', np.nan)),  # <-- use seasonality instead of cum_ret
+            'sharpe':      sharpe_ratio(rets_dict.get(prev_rank, [])),
+            'sortino':     sortino_ratio(rets_dict.get(prev_rank, [])),
+            'calmar':      calmar_ratio(rets_dict.get(prev_rank, [])),
         })
     df = pd.DataFrame(rows).set_index('prev_rank').sort_index()
-    base_cols = ['cum_ret', 'sharpe', 'sortino', 'calmar']
+    base_cols = ['seasonality', 'sharpe', 'sortino', 'calmar']
     for c in base_cols:
         df[f'{c}_01'] = minmax_01(df[c].values)
     norm_cols = [f'{c}_01' for c in base_cols]
@@ -226,6 +226,7 @@ NUM_T       = len(tickers)
 # =============================== #
 long_rankings:  dict[pd.Timestamp, list[str]] = {}
 short_rankings: dict[pd.Timestamp, list[str]] = {}
+ssa_scores_by_month: dict[pd.Timestamp, dict[str, float]] = {}  # <-- stash per-ticker scores per month
 
 cur = TEST_SIM_START
 while cur <= FINAL_END:
@@ -261,6 +262,7 @@ while cur <= FINAL_END:
         # fallback: keep original list
         long_rankings[cur]  = tickers.copy()
         short_rankings[cur] = tickers.copy()
+        ssa_scores_by_month[cur] = {}
     else:
         dfm = pd.DataFrame(stats).set_index('ticker')
 
@@ -278,6 +280,9 @@ while cur <= FINAL_END:
         orderS += [t for t in tickers if t not in orderS]
         short_rankings[cur] = orderS[:len(tickers)]
 
+        # store per-ticker score for this month (used in GPS calibration)
+        ssa_scores_by_month[cur] = dfm['score'].to_dict()
+
     cur += relativedelta(months=1)
 
 # =============================== #
@@ -287,22 +292,42 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
                 direction: str,
                 start_date: pd.Timestamp,
                 end_date: pd.Timestamp,
-                entry_cost: float = 0.0):
-    """Used only inside calibration to score previous ranks (NO-COST for metrics)."""
+                entry_cost: float = 0.0,
+                scores_by_month: dict[pd.Timestamp, dict[str, float]] | None = None):
+    """
+    Used only inside calibration to score previous ranks.
+    Returns cum_df with:
+      - cum_ret, cum_ret_wc (kept for diagnostics)
+      - seasonality: mean of directional SSA scores for the rank across the window
+    Also returns rets_nc for Sharpe/Sortino/Calmar.
+    """
     rets_nc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
     rets_wc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
+    seas_vals: dict[int, list[float]] = {k: [] for k in range(1, NUM_T + 1)}
 
     for dt in pd.date_range(start_date, end_date, freq='MS'):
         order = rankings.get(dt)
-        if order is None: continue
+        if order is None:
+            continue
+
+        scores_map = scores_by_month.get(dt, {}) if scores_by_month is not None else {}
+
         for r, t in enumerate(order, start=1):
             if r > NUM_T: break
+
+            # monthly raw simple return for the chosen ticker
             raw = Decimal(str(simple_rets[t].get(dt, 0.0)))
             if direction == 'short':
                 raw = Decimal(1) / (Decimal(1) + raw) - Decimal(1)
             rets_nc[r].append(raw)
+
             r_wc = (Decimal(1) - Decimal(str(entry_cost))) * (Decimal(1) + raw) - Decimal(1) if entry_cost > 0 else raw
             rets_wc[r].append(r_wc)
+
+            # seasonality score for that ticker in this month, directional
+            s = scores_map.get(t, np.nan)
+            if np.isfinite(s):
+                seas_vals[r].append(float(s if direction == 'long' else -s))
 
     rows = []
     START_D = Decimal(str(START_VALUE))
@@ -311,9 +336,16 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
         for x_nc, x_wc in zip(rets_nc[r], rets_wc[r]):
             vc_nc *= (Decimal(1) + x_nc)
             vc_wc *= (Decimal(1) + x_wc)
-        rows.append({'rank': float(r),
-                     'cum_ret':    vc_nc / START_D - Decimal(1),
-                     'cum_ret_wc': vc_wc / START_D - Decimal(1)})
+
+        # mean directional seasonality score over the window (NaN if no data)
+        seas_mean = float(np.nanmean(seas_vals[r])) if len(seas_vals[r]) else np.nan
+
+        rows.append({
+            'rank':        float(r),
+            'cum_ret':     vc_nc / START_D - Decimal(1),
+            'cum_ret_wc':  vc_wc / START_D - Decimal(1),
+            'seasonality': seas_mean
+        })
     cum_df = pd.DataFrame(rows).set_index('rank')
     return cum_df, rets_nc
 
@@ -534,7 +566,12 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
             continue
 
         cum_df_calib, rets_nc_calib = compute_cum(
-            rankings, direction=direction, start_date=win_start, end_date=win_end, entry_cost=0.0
+            rankings,
+            direction=direction,
+            start_date=win_start,
+            end_date=win_end,
+            entry_cost=0.0,
+            scores_by_month=ssa_scores_by_month  # <-- provide seasonality scores
         )
         metrics_df = build_metrics(cum_df_calib, rets_nc_calib)
         map_new_to_prev = invert_prev_to_new(metrics_df)

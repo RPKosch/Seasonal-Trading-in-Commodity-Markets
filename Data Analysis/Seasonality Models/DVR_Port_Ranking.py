@@ -22,7 +22,7 @@ START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025     # apply ONCE at month start in invested months
 
 # DVR params
-SIG_LEVEL               = 0.05        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
+SIG_LEVEL               = 1        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
 
 # GPS switches
 GPS_ROLLING_ENABLED     = True       # True = rolling 5y monthly re-calibration; False = fixed first 5y before FINAL_SIM_START
@@ -119,31 +119,25 @@ def gps_harmonic_01(vals: list[float] | np.ndarray) -> float:
     if np.any(v == 0.0):  return 0.0
     return len(v) / np.sum(1.0 / v)
 
-def build_metrics(cum_df: pd.DataFrame, rets_dict: dict[int, list[Decimal]]) -> pd.DataFrame:
-    """
-    GPS score across ranks based on cum_ret, sharpe, sortino, calmar (NO-COST for metrics).
-    """
-    rows = []
-    for prev_rank, cum_row in cum_df.iterrows():
-        rows.append({
-            'prev_rank':  prev_rank,
-            'cum_ret':    float(cum_row['cum_ret']),
-            'cum_ret_wc': float(cum_row['cum_ret_wc']),
-            'sharpe':     sharpe_ratio(rets_dict.get(prev_rank, [])),
-            'sortino':    sortino_ratio(rets_dict.get(prev_rank, [])),
-            'calmar':     calmar_ratio(rets_dict.get(prev_rank, [])),
-        })
-    df = pd.DataFrame(rows).set_index('prev_rank').sort_index()
-    base_cols = ['cum_ret', 'sharpe', 'sortino', 'calmar']
-    for c in base_cols:
-        df[f'{c}_01'] = minmax_01(df[c].values)
-    norm_cols = [f'{c}_01' for c in base_cols]
-    df['score'] = [gps_harmonic_01(df.loc[idx, norm_cols].values) for idx in df.index]
-    df['new_rank'] = df['score'].rank(ascending=False, method='first')
-    df['rank_change'] = df.index - df['new_rank']
-    return df
+# =============================== #
+# 4) LOAD DATA
+# =============================== #
+base = ROOT_DIR
+# DVR showcase runs on LOG monthly returns; GPS metrics use SIMPLE monthly returns
+log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")
+simple_rets = load_returns(base / "All_Monthly_Return_Data")
+tickers     = list(log_rets)
+NUM_T       = len(tickers)
 
-# ---------- DVR core (Z-score ranking, no EWMA) ----------
+# =============================== #
+# 5) DVR-BASED RANKINGS BY MONTH (Z-score)
+# =============================== #
+long_rankings:  dict[pd.Timestamp, list[str]] = {}
+short_rankings: dict[pd.Timestamp, list[str]] = {}
+
+# keep z-scores per month to feed GPS when SIG_LEVEL >= 1
+z_scores_by_month: dict[pd.Timestamp, dict[str, float]] = {}
+
 def newey_west_lags(T: int) -> int:
     """Rule of thumb: L = floor(0.75 * T^(1/3)), at least 1."""
     return max(1, int(np.floor(0.75 * (T ** (1/3)))))
@@ -177,22 +171,6 @@ def dvr_stats(monthly_series: pd.Series, forecast_month: pd.Timestamp,
         beta, pval, zscore = (np.nan, np.nan, np.nan)
 
     return (beta, pval, zscore)
-
-# =============================== #
-# 4) LOAD DATA
-# =============================== #
-base = ROOT_DIR
-# DVR showcase runs on LOG monthly returns; GPS metrics use SIMPLE monthly returns
-log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")
-simple_rets = load_returns(base / "All_Monthly_Return_Data")
-tickers     = list(log_rets)
-NUM_T       = len(tickers)
-
-# =============================== #
-# 5) DVR-BASED RANKINGS BY MONTH (Z-score)
-# =============================== #
-long_rankings:  dict[pd.Timestamp, list[str]] = {}
-short_rankings: dict[pd.Timestamp, list[str]] = {}
 
 def _rank_greedy(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
     """SIG>=1: plain greedy by Z (longs: desc; shorts: asc)."""
@@ -256,6 +234,9 @@ while cur <= FINAL_END:
     else:
         dfm = pd.DataFrame(stats).set_index('ticker')
 
+        # --- keep z-scores for GPS use ---
+        z_scores_by_month[cur] = dfm['z'].to_dict()
+
         # --- diagnostics (helps verify difference across SIG settings) ---
         n_tot  = int(len(dfm))
         n_elig = int(dfm['elig'].sum())
@@ -282,26 +263,53 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
                 start_date: pd.Timestamp,
                 end_date: pd.Timestamp,
                 entry_cost: float = 0.0):
-    """Used only inside calibration to score previous ranks (NO-COST for metrics)."""
+    """
+    Used only inside GPS calibration to score previous ranks.
+    Returns:
+      cum_df           : per prev_rank cumulative returns (no/w cost) over window
+      rets_nc          : per prev_rank list of monthly simple returns (NO-COST) over window
+      z_by_prev_rank   : per prev_rank list of per-month DVR z-scores for the ticker at that rank.
+                         For shorts, z-scores are sign-flipped so 'more negative' counts as larger-is-better.
+    """
     rets_nc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
     rets_wc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
+    z_by_prev_rank: dict[int, list[float]] = {k: [] for k in range(1, NUM_T + 1)}
 
     for dt in pd.date_range(start_date, end_date, freq='MS'):
         order = rankings.get(dt)
-        if order is None: continue
+        if order is None:
+            continue
+
+        zmap = z_scores_by_month.get(dt, {})  # ticker -> z
+
         for r, t in enumerate(order, start=1):
-            if r > NUM_T: break
+            if r > NUM_T:
+                break
+
+            # monthly simple return for metrics (no-cost)
             raw = Decimal(str(simple_rets[t].get(dt, 0.0)))
             if direction == 'short':
                 raw = Decimal(1) / (Decimal(1) + raw) - Decimal(1)
             rets_nc[r].append(raw)
-            r_wc = (Decimal(1) - Decimal(str(entry_cost))) * (Decimal(1) + raw) - Decimal(1) if entry_cost > 0 else raw
+
+            # with-cost variant if needed (not used in GPS metrics)
+            if entry_cost > 0:
+                r_wc = (Decimal(1) - Decimal(str(entry_cost))) * (Decimal(1) + raw) - Decimal(1)
+            else:
+                r_wc = raw
             rets_wc[r].append(r_wc)
+
+            # z-score for the ticker at prev-rank r this month
+            z_val = zmap.get(t, np.nan)
+            if direction == 'short':
+                z_val = -z_val if np.isfinite(z_val) else z_val
+            z_by_prev_rank[r].append(float(z_val) if np.isfinite(z_val) else np.nan)
 
     rows = []
     START_D = Decimal(str(START_VALUE))
     for r in range(1, NUM_T + 1):
-        vc_nc = START_D; vc_wc = START_D
+        vc_nc = START_D
+        vc_wc = START_D
         for x_nc, x_wc in zip(rets_nc[r], rets_wc[r]):
             vc_nc *= (Decimal(1) + x_nc)
             vc_wc *= (Decimal(1) + x_wc)
@@ -309,7 +317,60 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
                      'cum_ret':    vc_nc / START_D - Decimal(1),
                      'cum_ret_wc': vc_wc / START_D - Decimal(1)})
     cum_df = pd.DataFrame(rows).set_index('rank')
-    return cum_df, rets_nc
+    return cum_df, rets_nc, z_by_prev_rank
+
+def build_metrics(cum_df: pd.DataFrame,
+                  rets_dict: dict[int, list[Decimal]],
+                  *,
+                  use_metric: str,  # 'zscore' | 'rank'
+                  z_rank_dict: dict[int, list[float]] | None = None) -> pd.DataFrame:
+    """
+    Build GPS metrics per previous rank.
+      - If use_metric == 'zscore': first metric is mean z-score by previous rank (direction-adjusted).
+      - If use_metric == 'rank'  : first metric is -prev_rank (so smaller rank is better).
+    Other three metrics are Sharpe, Sortino, Calmar measured on NO-COST monthly returns (rets_dict).
+    """
+    rows = []
+    for prev_rank, _ in cum_df.iterrows():
+        pr = int(prev_rank)
+
+        # first metric selection
+        if use_metric == 'zscore':
+            if z_rank_dict is None:
+                seasonality_score = np.nan
+            else:
+                z_list = np.asarray(z_rank_dict.get(pr, []), dtype=float)
+                seasonality_score = float(np.nanmean(z_list)) if np.isfinite(z_list).any() else np.nan
+        elif use_metric == 'rank':
+            seasonality_score = -float(pr)  # invert so rank 1 is best in larger-is-better
+        else:
+            seasonality_score = np.nan  # fallback not expected
+
+        # risk/return metrics
+        sr  = sharpe_ratio(rets_dict.get(pr, []))
+        sor = sortino_ratio(rets_dict.get(pr, []))
+        cal = calmar_ratio(rets_dict.get(pr, []))
+
+        rows.append({
+            'prev_rank':    pr,
+            'seasonality_score': seasonality_score,
+            'sharpe':       sr,
+            'sortino':      sor,
+            'calmar':       cal,
+        })
+
+    df = pd.DataFrame(rows).set_index('prev_rank').sort_index()
+
+    # Scale to [0,1], larger-is-better
+    base_cols = ['seasonality_score', 'sharpe', 'sortino', 'calmar']
+    for c in base_cols:
+        df[f'{c}_01'] = minmax_01(df[c].values)
+
+    norm_cols = [f'{c}_01' for c in base_cols]
+    df['score'] = [gps_harmonic_01(df.loc[idx, norm_cols].values) for idx in df.index]
+    df['new_rank'] = df['score'].rank(ascending=False, method='first')
+    df['rank_change'] = df.index - df['new_rank']
+    return df
 
 def invert_prev_to_new(metrics_df: pd.DataFrame) -> dict[int, int]:
     inv = {}
@@ -527,10 +588,19 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
         if win_end < win_start:
             continue
 
-        cum_df_calib, rets_nc_calib = compute_cum(
+        cum_df_calib, rets_nc_calib, z_rank = compute_cum(
             rankings, direction=direction, start_date=win_start, end_date=win_end, entry_cost=0.0
         )
-        metrics_df = build_metrics(cum_df_calib, rets_nc_calib)
+
+        # choose the first metric for GPS
+        USE_METRIC = 'zscore' if float(SIG_LEVEL) >= 1.0 else 'rank'
+
+        metrics_df = build_metrics(
+            cum_df_calib,
+            rets_nc_calib,
+            use_metric=USE_METRIC,
+            z_rank_dict=z_rank if USE_METRIC == 'zscore' else None
+        )
         map_new_to_prev = invert_prev_to_new(metrics_df)
 
         # Build order by prev-rank for today
