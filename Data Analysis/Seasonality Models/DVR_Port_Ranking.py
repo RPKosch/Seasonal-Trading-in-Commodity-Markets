@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal
+from functools import lru_cache
 
 # =============================== #
 # 1) PARAMETERS & WINDOWS
@@ -22,10 +23,10 @@ START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025     # apply ONCE at month start in invested months
 
 # DVR params
-SIG_LEVEL               = 1        # p-value threshold for “eligibility” bucket (e.g., 0.10, 0.05). 1.0 ≡ no filter.
+SIG_LEVEL               = 1          # 1.0 ≡ no filter (GREEDY by Z); else significance-first
 
 # GPS switches
-GPS_ROLLING_ENABLED     = True       # True = rolling 5y monthly re-calibration; False = fixed first 5y before FINAL_SIM_START
+GPS_ROLLING_ENABLED     = True       # True = rolling 5y monthly re-calibration; False = fixed first 5y
 GPS_CALIB_YEARS         = SIM_YEARS
 
 # Plot window (clip to what you want to see)
@@ -37,6 +38,11 @@ DEBUG_DATE              = None
 # Contract selection
 VOLUME_THRESHOLD        = 1000
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
+
+# ==== SPEED/FEATURE TOGGLES ====
+TOP1_ONLY               = True       # True = simulate only Top-1 portfolio(s)
+RUN_DAILY               = True       # True = run daily-contract simulation (shows daily lines + stats)
+DIAG_PRINT              = False      # set True to see DVR stats per month (slow/verbose)
 
 # =============================== #
 # 2) DATE RANGES
@@ -129,6 +135,9 @@ simple_rets = load_returns(base / "All_Monthly_Return_Data")
 tickers     = list(log_rets)
 NUM_T       = len(tickers)
 
+# Ranks to simulate (Top-1 or full universe)
+RANKS_TO_SIM = [1] if TOP1_ONLY else list(range(1, NUM_T + 1))
+
 # =============================== #
 # 5) DVR-BASED RANKINGS BY MONTH (Z-score)
 # =============================== #
@@ -181,42 +190,28 @@ def _rank_greedy(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
 def _rank_sig_first(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
     """
     Significance-first ranking that respects the user-chosen p-value threshold (sig_level).
-
-    Logic:
-      • Build 'eligible' buckets using (p <= sig_level) and beta sign.
-      • Sort eligible longs by beta desc, eligible shorts by beta asc.
-      • Put all remaining names (the 'rest') after the eligible bucket,
-        sorted the same way by beta for the relevant side.
-      • Return full-universe orders (no names dropped).
     """
-    # Defensive copy and clean NaNs
     df = dfm.copy()
     df = df[np.isfinite(df['beta']) & np.isfinite(df['pval'])]
     if df.empty:
         return [], []
 
-    # Eligible sets by sign and p-value
     elig_long  = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] > 0)]
     elig_short = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] < 0)]
 
-    # Rest = universe minus eligible by side
     rest_long  = df.loc[~df.index.isin(elig_long.index)]
     rest_short = df.loc[~df.index.isin(elig_short.index)]
 
-    # Sort rules
-    # Longs: more positive beta is better
-    elig_long  = elig_long.sort_values('beta', ascending=False)
+    elig_long  = elig_long.sort_values('beta', ascending=False)  # more positive beta better
     rest_long  = rest_long.sort_values('beta', ascending=False)
 
-    # Shorts: more negative beta is better
-    elig_short = elig_short.sort_values('beta', ascending=True)
+    elig_short = elig_short.sort_values('beta', ascending=True)  # more negative beta better
     rest_short = rest_short.sort_values('beta', ascending=True)
 
     orderL = elig_long.index.tolist()  + [t for t in rest_long.index.tolist()  if t not in elig_long.index]
     orderS = elig_short.index.tolist() + [t for t in rest_short.index.tolist() if t not in elig_short.index]
 
     return orderL, orderS
-
 
 cur = TEST_SIM_START
 while cur <= FINAL_END:
@@ -233,14 +228,12 @@ while cur <= FINAL_END:
         short_rankings[cur] = tickers.copy()
     else:
         dfm = pd.DataFrame(stats).set_index('ticker')
-
-        # --- keep z-scores for GPS use ---
         z_scores_by_month[cur] = dfm['z'].to_dict()
 
-        # --- diagnostics (helps verify difference across SIG settings) ---
-        n_tot  = int(len(dfm))
-        n_elig = int(dfm['elig'].sum())
-        print(f"[{cur.date()}] DVR stats: N={n_tot}, eligible (p <= {SIG_LEVEL}): {n_elig}")
+        if DIAG_PRINT:
+            n_tot  = int(len(dfm))
+            n_elig = int(dfm['elig'].sum())
+            print(f"[{cur.date()}] DVR stats: N={n_tot}, eligible (p <= {SIG_LEVEL}): {n_elig}")
 
         if float(SIG_LEVEL) >= 0.999999:          # GREEDY mode
             orderL, orderS = _rank_greedy(dfm)
@@ -271,43 +264,40 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
       z_by_prev_rank   : per prev_rank list of per-month DVR z-scores for the ticker at that rank.
                          For shorts, z-scores are sign-flipped so 'more negative' counts as larger-is-better.
     """
-    rets_nc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
-    rets_wc: dict[int, list[Decimal]] = {k: [] for k in range(1, NUM_T + 1)}
-    z_by_prev_rank: dict[int, list[float]] = {k: [] for k in range(1, NUM_T + 1)}
+    rets_nc: dict[int, list[Decimal]] = {}
+    rets_wc: dict[int, list[Decimal]] = {}
+    z_by_prev_rank: dict[int, list[float]] = {}
 
     for dt in pd.date_range(start_date, end_date, freq='MS'):
         order = rankings.get(dt)
         if order is None:
             continue
+        n_here = len(order)
+        for r in range(1, n_here + 1):
+            if r not in rets_nc:
+                rets_nc[r] = []
+                rets_wc[r] = []
+                z_by_prev_rank[r] = []
 
         zmap = z_scores_by_month.get(dt, {})  # ticker -> z
-
         for r, t in enumerate(order, start=1):
-            if r > NUM_T:
-                break
-
-            # monthly simple return for metrics (no-cost)
             raw = Decimal(str(simple_rets[t].get(dt, 0.0)))
             if direction == 'short':
                 raw = Decimal(1) / (Decimal(1) + raw) - Decimal(1)
             rets_nc[r].append(raw)
 
-            # with-cost variant if needed (not used in GPS metrics)
-            if entry_cost > 0:
-                r_wc = (Decimal(1) - Decimal(str(entry_cost))) * (Decimal(1) + raw) - Decimal(1)
-            else:
-                r_wc = raw
+            r_wc = (Decimal(1) - Decimal(str(entry_cost))) * (Decimal(1) + raw) - Decimal(1) if entry_cost > 0 else raw
             rets_wc[r].append(r_wc)
 
-            # z-score for the ticker at prev-rank r this month
             z_val = zmap.get(t, np.nan)
             if direction == 'short':
                 z_val = -z_val if np.isfinite(z_val) else z_val
             z_by_prev_rank[r].append(float(z_val) if np.isfinite(z_val) else np.nan)
 
+    # cumulative return per prev rank
     rows = []
     START_D = Decimal(str(START_VALUE))
-    for r in range(1, NUM_T + 1):
+    for r in sorted(rets_nc.keys()):
         vc_nc = START_D
         vc_wc = START_D
         for x_nc, x_wc in zip(rets_nc[r], rets_wc[r]):
@@ -316,7 +306,7 @@ def compute_cum(rankings: dict[pd.Timestamp, list[str]],
         rows.append({'rank': float(r),
                      'cum_ret':    vc_nc / START_D - Decimal(1),
                      'cum_ret_wc': vc_wc / START_D - Decimal(1)})
-    cum_df = pd.DataFrame(rows).set_index('rank')
+    cum_df = pd.DataFrame(rows).set_index('rank').sort_index()
     return cum_df, rets_nc, z_by_prev_rank
 
 def build_metrics(cum_df: pd.DataFrame,
@@ -324,17 +314,10 @@ def build_metrics(cum_df: pd.DataFrame,
                   *,
                   use_metric: str,  # 'zscore' | 'rank'
                   z_rank_dict: dict[int, list[float]] | None = None) -> pd.DataFrame:
-    """
-    Build GPS metrics per previous rank.
-      - If use_metric == 'zscore': first metric is mean z-score by previous rank (direction-adjusted).
-      - If use_metric == 'rank'  : first metric is -prev_rank (so smaller rank is better).
-    Other three metrics are Sharpe, Sortino, Calmar measured on NO-COST monthly returns (rets_dict).
-    """
     rows = []
-    for prev_rank, _ in cum_df.iterrows():
+    for prev_rank in cum_df.index.astype(int):
         pr = int(prev_rank)
 
-        # first metric selection
         if use_metric == 'zscore':
             if z_rank_dict is None:
                 seasonality_score = np.nan
@@ -342,11 +325,10 @@ def build_metrics(cum_df: pd.DataFrame,
                 z_list = np.asarray(z_rank_dict.get(pr, []), dtype=float)
                 seasonality_score = float(np.nanmean(z_list)) if np.isfinite(z_list).any() else np.nan
         elif use_metric == 'rank':
-            seasonality_score = -float(pr)  # invert so rank 1 is best in larger-is-better
+            seasonality_score = -float(pr)  # invert so rank 1 is best
         else:
-            seasonality_score = np.nan  # fallback not expected
+            seasonality_score = np.nan
 
-        # risk/return metrics
         sr  = sharpe_ratio(rets_dict.get(pr, []))
         sor = sortino_ratio(rets_dict.get(pr, []))
         cal = calmar_ratio(rets_dict.get(pr, []))
@@ -361,7 +343,6 @@ def build_metrics(cum_df: pd.DataFrame,
 
     df = pd.DataFrame(rows).set_index('prev_rank').sort_index()
 
-    # Scale to [0,1], larger-is-better
     base_cols = ['seasonality_score', 'sharpe', 'sortino', 'calmar']
     for c in base_cols:
         df[f'{c}_01'] = minmax_01(df[c].values)
@@ -382,6 +363,10 @@ def invert_prev_to_new(metrics_df: pd.DataFrame) -> dict[int, int]:
 # =============================== #
 # 7) DAILY CONTRACT HELPERS
 # =============================== #
+@lru_cache(maxsize=4096)
+def find_contract_cached(ticker: str, year: int, month: int):
+    return find_contract(ticker, year, month)
+
 def find_contract(ticker: str, year: int, month: int):
     root    = ROOT_DIR / f"{ticker}_Historic_Data"
     m0      = datetime(year, month, 1)
@@ -391,7 +376,6 @@ def find_contract(ticker: str, year: int, month: int):
     candidates = []
     earliest_first_date = None
     if not root.exists():
-        print(f"  ✖ {year}-{month:02d} {ticker}: directory not found: {root}")
         return None, None
 
     for p in root.iterdir():
@@ -404,8 +388,7 @@ def find_contract(ticker: str, year: int, month: int):
 
         try:
             df = pd.read_csv(p, parse_dates=["Date"])
-        except Exception as e:
-            print(f"  • skipped {p.name}: {e}")
+        except Exception:
             continue
 
         if not df.empty:
@@ -419,7 +402,6 @@ def find_contract(ticker: str, year: int, month: int):
         if mdf.empty: continue
 
         if "volume" not in mdf.columns:
-            print(f"  • rejected {year}-{month:02d} {ticker} {p.name}: no 'volume'.")
             continue
 
         vol = pd.to_numeric(mdf["volume"], errors="coerce")
@@ -429,10 +411,6 @@ def find_contract(ticker: str, year: int, month: int):
         candidates.append((lag, mdf.sort_values("Date"), p.name, avg_vol))
 
     if not candidates:
-        if earliest_first_date is not None and earliest_first_date > mend:
-            print(f"  ✖ {year}-{month:02d} {ticker}: earliest file {earliest_first_date.date()} > month-end.")
-        else:
-            print(f"  ✖ {year}-{month:02d} {ticker}: no contract met criteria.")
         return None, None
 
     _, best_mdf, _, _ = min(candidates, key=lambda x: x[0])
@@ -456,30 +434,26 @@ def realized_month_return_from_daily(mdf: pd.DataFrame, is_short: bool) -> float
     return factor - 1.0
 
 # =============================== #
-# 8) DAILY NAV ENGINES (BASELINE AND GPS)
+# 8) NAV ENGINES — DAILY (BASELINE & GPS)
 # =============================== #
 def _simulate_daily_nav_from_order_for_month(order: list[str],
                                              direction: str,
                                              dt: pd.Timestamp,
                                              nav_dict: dict[int, Decimal],
                                              entry_cost: float) -> dict[pd.Timestamp, dict[int, float]]:
-    """
-    For month dt, for every rank k, pick ticker = order[k-1], charge entry cost once,
-    then compound daily using daily contract bars. Returns {date -> {k -> nav_k}}.
-    """
-    # Entry cost once per rank at month start (if we have a mapping for k)
-    for k in range(1, NUM_T + 1):
+    # Entry cost once per rank at month start
+    for k in RANKS_TO_SIM:
         if k <= len(order) and order[k-1]:
             nav_dict[k] *= (Decimal(1) - Decimal(str(entry_cost)))
 
     # Load daily bars for ranks
     per_rank_df = {}
-    for k in range(1, NUM_T + 1):
+    for k in RANKS_TO_SIM:
         if k > len(order) or not order[k-1]:
             per_rank_df[k] = None
             continue
         tkr = order[k - 1]
-        _, mdf = find_contract(tkr, dt.year, dt.month)
+        _, mdf = find_contract_cached(tkr, dt.year, dt.month)
         if mdf is None or mdf.empty:
             per_rank_df[k] = None
         else:
@@ -494,11 +468,11 @@ def _simulate_daily_nav_from_order_for_month(order: list[str],
     else:
         all_dates = []
 
-    prev_close = {k: None for k in range(1, NUM_T + 1)}
+    prev_close = {k: None for k in RANKS_TO_SIM}
     out = {}
 
     for d in all_dates:
-        for k in range(1, NUM_T + 1):
+        for k in RANKS_TO_SIM:
             dfk = per_rank_df.get(k)
             if dfk is None:
                 continue
@@ -520,7 +494,7 @@ def _simulate_daily_nav_from_order_for_month(order: list[str],
             nav_dict[k] *= (Decimal(1) + Decimal(step_ret))
             prev_close[k] = close
 
-        out[pd.Timestamp(d)] = {k: float(nav_dict[k]) for k in range(1, NUM_T + 1)}
+        out[pd.Timestamp(d)] = {k: float(nav_dict[k]) for k in RANKS_TO_SIM}
 
     return out
 
@@ -529,12 +503,9 @@ def simulate_baseline_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
                                       start_dt: pd.Timestamp,
                                       end_dt: pd.Timestamp,
                                       entry_cost: float) -> pd.DataFrame:
-    """
-    Daily WITH-COST NAV paths for portfolios 1..NUM_T using identity mapping (baseline DVR order).
-    Index = daily trading dates we actually observe. Includes an initial anchor at start_dt.
-    """
-    nav = {k: Decimal(str(START_VALUE)) for k in range(1, NUM_T + 1)}
-    daily_rows = [(pd.Timestamp(start_dt), {k: float(nav[k]) for k in range(1, NUM_T + 1)})]
+    nav = {k: Decimal(str(START_VALUE)) for k in RANKS_TO_SIM}
+    ANCHOR_TS = pd.Timestamp(start_dt) - pd.Timedelta(microseconds=1)
+    daily_rows = [(ANCHOR_TS, {k: float(nav[k]) for k in RANKS_TO_SIM})]
 
     for dt in pd.date_range(start_dt, end_dt, freq='MS'):
         order = rankings.get(dt)
@@ -545,13 +516,8 @@ def simulate_baseline_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
             daily_rows.append((d, snap))
 
     df = pd.DataFrame(
-        [{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in range(1, NUM_T + 1)}} for d, snap in daily_rows]
+        [{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in RANKS_TO_SIM}} for d, snap in daily_rows]
     ).set_index('date').sort_index()
-
-    for k in range(1, NUM_T + 1):
-        col = f'portfolio_{k}'
-        if col not in df.columns:
-            df[col] = np.nan
     return df
 
 def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
@@ -561,12 +527,9 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
                                  calib_years: int,
                                  rolling: bool,
                                  entry_cost: float) -> pd.DataFrame:
-    """
-    Daily WITH-COST NAV paths for portfolios 1..NUM_T using monthly GPS mapping of prev->new ranks.
-    Entry cost applied once at each month start; buy-and-hold within month for the mapped ticker.
-    """
-    nav = {k: Decimal(str(START_VALUE)) for k in range(1, NUM_T + 1)}
-    daily_rows = [(pd.Timestamp(apply_start), {k: float(nav[k]) for k in range(1, NUM_T + 1)})]
+    nav = {k: Decimal(str(START_VALUE)) for k in RANKS_TO_SIM}
+    ANCHOR_TS = pd.Timestamp(apply_start) - pd.Timedelta(microseconds=1)
+    daily_rows = [(ANCHOR_TS, {k: float(nav[k]) for k in RANKS_TO_SIM})]
 
     if not rolling:
         fixed_calib_start = pd.Timestamp(datetime(apply_start.year - calib_years, 1, 1))
@@ -605,7 +568,7 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
 
         # Build order by prev-rank for today
         mapped_order = []
-        for new_rank in range(1, NUM_T + 1):
+        for new_rank in range(1, max(RANKS_TO_SIM) + 1):  # only need ranks we'll simulate
             prev_rank = map_new_to_prev.get(new_rank, new_rank)
             if prev_rank < 1 or prev_rank > len(order_today):
                 mapped_order.append('')
@@ -617,96 +580,319 @@ def simulate_gps_nav_paths_daily(rankings: dict[pd.Timestamp, list[str]],
             daily_rows.append((d, snap))
 
     df = pd.DataFrame(
-        [{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in range(1, NUM_T + 1)}} for d, snap in daily_rows]
+        [{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in RANKS_TO_SIM}} for d, snap in daily_rows]
     ).set_index('date').sort_index()
-
-    for k in range(1, NUM_T + 1):
-        col = f'portfolio_{k}'
-        if col not in df.columns:
-            df[col] = np.nan
     return df
 
 # =============================== #
-# 9) BUILD NAVs & PLOTS (DAILY)
+# 8A) NAV ENGINES — MONTHLY (BASELINE & GPS)
+# =============================== #
+def simulate_baseline_nav_paths_monthly(rankings: dict[pd.Timestamp, list[str]],
+                                        direction: str,
+                                        start_dt: pd.Timestamp,
+                                        end_dt: pd.Timestamp,
+                                        entry_cost: float,
+                                        return_top1: bool = False):
+    nav = {k: Decimal(str(START_VALUE)) for k in RANKS_TO_SIM}
+    ANCHOR_TS = pd.Timestamp(start_dt) - pd.Timedelta(microseconds=1)
+    rows = [(ANCHOR_TS, {k: float(nav[k]) for k in RANKS_TO_SIM})]
+    top1_list = []
+
+    for dt in pd.date_range(start_dt, end_dt, freq='MS'):
+        order = rankings.get(dt)
+        if not order:
+            continue
+        if return_top1:
+            top1_list.append((dt, order[0] if len(order) >= 1 else ''))
+
+        # cost at month start
+        for k in RANKS_TO_SIM:
+            if k <= len(order) and order[k-1]:
+                nav[k] *= (Decimal(1) - Decimal(str(entry_cost)))
+
+        # apply monthly return once
+        for k in RANKS_TO_SIM:
+            if k > len(order) or not order[k-1]:
+                continue
+            tkr = order[k-1]
+            r = float(simple_rets[tkr].get(dt, 0.0))
+            if direction == 'short':
+                r = (1.0 / (1.0 + r)) - 1.0
+            nav[k] *= (Decimal(1) + Decimal(str(r)))
+
+        rows.append((pd.Timestamp(dt), {k: float(nav[k]) for k in RANKS_TO_SIM}))
+
+    df = pd.DataFrame([{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in RANKS_TO_SIM}} for d, snap in rows]).set_index('date').sort_index()
+    if return_top1:
+        top1_ser = pd.Series({d: t for d, t in top1_list}, name='baseline_top1')
+        return df, top1_ser
+    return df
+
+def simulate_gps_nav_paths_monthly(rankings: dict[pd.Timestamp, list[str]],
+                                   direction: str,
+                                   apply_start: pd.Timestamp,
+                                   apply_end: pd.Timestamp,
+                                   calib_years: int,
+                                   rolling: bool,
+                                   entry_cost: float,
+                                   return_top1: bool = False):
+    nav = {k: Decimal(str(START_VALUE)) for k in RANKS_TO_SIM}
+    ANCHOR_TS = pd.Timestamp(apply_start) - pd.Timedelta(microseconds=1)
+    rows = [(ANCHOR_TS, {k: float(nav[k]) for k in RANKS_TO_SIM})]
+    top1_list = []
+
+    if not rolling:
+        fixed_calib_start = pd.Timestamp(datetime(apply_start.year - calib_years, 1, 1))
+        fixed_calib_end   = apply_start - pd.offsets.MonthEnd(1)
+
+    for dt in pd.date_range(apply_start, apply_end, freq='MS'):
+        order_today = rankings.get(dt)
+        if not order_today:
+            continue
+
+        # calibration window
+        if rolling:
+            dt_minus = dt - relativedelta(years=calib_years)
+            win_start = pd.Timestamp(datetime(dt_minus.year, dt_minus.month, 1))
+            win_end   = dt - pd.offsets.MonthEnd(1)
+        else:
+            win_start = fixed_calib_start
+            win_end   = fixed_calib_end
+        if win_end < win_start:
+            continue
+
+        cum_df_calib, rets_nc_calib, z_rank = compute_cum(
+            rankings, direction=direction, start_date=win_start, end_date=win_end, entry_cost=0.0
+        )
+        USE_METRIC = 'zscore' if float(SIG_LEVEL) >= 1.0 else 'rank'
+        metrics_df = build_metrics(cum_df_calib, rets_nc_calib, use_metric=USE_METRIC, z_rank_dict=z_rank if USE_METRIC == 'zscore' else None)
+        map_new_to_prev = invert_prev_to_new(metrics_df)
+
+        # Build order by prev-rank for today (only as many ranks as needed)
+        mapped_order = []
+        for new_rank in range(1, max(RANKS_TO_SIM) + 1):
+            prev_rank = map_new_to_prev.get(new_rank, new_rank)
+            if prev_rank < 1 or prev_rank > len(order_today):
+                mapped_order.append('')
+            else:
+                mapped_order.append(order_today[prev_rank - 1])
+
+        if return_top1:
+            top1_list.append((dt, mapped_order[0] if len(mapped_order) >= 1 else ''))
+
+        # cost at month start
+        for k in RANKS_TO_SIM:
+            if k <= len(mapped_order) and mapped_order[k-1]:
+                nav[k] *= (Decimal(1) - Decimal(str(entry_cost)))
+
+        # apply monthly return once
+        for k in RANKS_TO_SIM:
+            if k > len(mapped_order) or not mapped_order[k-1]:
+                continue
+            tkr = mapped_order[k-1]
+            r = float(simple_rets[tkr].get(dt, 0.0))
+            if direction == 'short':
+                r = (1.0 / (1.0 + r)) - 1.0
+            nav[k] *= (Decimal(1) + Decimal(str(r)))
+
+        rows.append((pd.Timestamp(dt), {k: float(nav[k]) for k in RANKS_TO_SIM}))
+
+    df = pd.DataFrame([{**{'date': d}, **{f'portfolio_{k}': snap.get(k, np.nan) for k in RANKS_TO_SIM}} for d, snap in rows]).set_index('date').sort_index()
+    if return_top1:
+        top1_ser = pd.Series({d: t for d, t in top1_list}, name='gps_top1')
+        return df, top1_ser
+    return df
+
+# =============================== #
+# 9) BUILD NAVs & PLOTS (DAILY + MONTHLY)
 # =============================== #
 print("-" * 100)
 print(f"Apply Period: {FINAL_SIM_START.date()} -> {FINAL_SIM_END.date()}")
 print(f"GPS monthly mapping (DVR prev-ranks): rolling={GPS_ROLLING_ENABLED}, window={GPS_CALIB_YEARS}y")
 print(f"Entry cost applied once per month: {ENTRY_COST}")
 print(f"DVR ranking: Z-score (Newey–West t-stat), p eligibility <= {SIG_LEVEL}")
+print(f"TOP1_ONLY={TOP1_ONLY} | RUN_DAILY={RUN_DAILY}")
 
-# Daily WITH-COST monthly-invest-but-daily-compound NAVs
-long_baseline_nav_daily  = simulate_baseline_nav_paths_daily(long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST)
-short_baseline_nav_daily = simulate_baseline_nav_paths_daily(short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST)
+# Monthly-compounded NAVs (fast path) + capture Top-1 selections
+long_baseline_nav_monthly,  long_top1_baseline  = simulate_baseline_nav_paths_monthly(
+    long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST, return_top1=True)
+short_baseline_nav_monthly, short_top1_baseline = simulate_baseline_nav_paths_monthly(
+    short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST, return_top1=True)
 
-long_gps_nav_daily  = simulate_gps_nav_paths_daily(long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END,
-                                                   GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST)
-short_gps_nav_daily = simulate_gps_nav_paths_daily(short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END,
-                                                   GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST)
+long_gps_nav_monthly,  long_top1_gps  = simulate_gps_nav_paths_monthly(
+    long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END, GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST, return_top1=True)
+short_gps_nav_monthly, short_top1_gps = simulate_gps_nav_paths_monthly(
+    short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END, GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST, return_top1=True)
+
+# Optionally: Daily WITH-COST monthly-invest-but-daily-compound NAVs
+if RUN_DAILY:
+    long_baseline_nav_daily  = simulate_baseline_nav_paths_daily(long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST)
+    short_baseline_nav_daily = simulate_baseline_nav_paths_daily(short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END, ENTRY_COST)
+
+    long_gps_nav_daily  = simulate_gps_nav_paths_daily(long_rankings,  'long',  FINAL_SIM_START, FINAL_SIM_END,
+                                                       GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST)
+    short_gps_nav_daily = simulate_gps_nav_paths_daily(short_rankings, 'short', FINAL_SIM_START, FINAL_SIM_END,
+                                                       GPS_CALIB_YEARS, GPS_ROLLING_ENABLED, ENTRY_COST)
 
 # Output dirs
-out_root = Path().resolve() / "Outputs" / f"DVR_SIG={SIG_LEVEL}_vs_GPS_ROLLING={GPS_ROLLING_ENABLED}"
+out_root = Path().resolve() / "Outputs" / f"DVR_SIG={SIG_LEVEL}_GPS_ROLLING={GPS_ROLLING_ENABLED}_TOP1={TOP1_ONLY}_DAILY={RUN_DAILY}"
 plot_dir_long  = out_root / "plots" / "LONG"
 plot_dir_short = out_root / "plots" / "SHORT"
+out_root.mkdir(parents=True, exist_ok=True)
 for p in [plot_dir_long, plot_dir_short]:
     p.mkdir(parents=True, exist_ok=True)
 
-# Save NAV CSVs (daily)
-long_baseline_nav_daily.to_csv(out_root / "LONG_baseline_nav_daily.csv")
-long_gps_nav_daily.to_csv(out_root / "LONG_gps_nav_daily.csv")
-short_baseline_nav_daily.to_csv(out_root / "SHORT_baseline_nav_daily.csv")
-short_gps_nav_daily.to_csv(out_root / "SHORT_gps_nav_daily.csv")
+# Save NAV CSVs (monthly always; daily only if generated)
+long_baseline_nav_monthly.to_csv(out_root / "LONG_baseline_nav_monthly.csv")
+long_gps_nav_monthly.to_csv(out_root / "LONG_gps_nav_monthly.csv")
+short_baseline_nav_monthly.to_csv(out_root / "SHORT_baseline_nav_monthly.csv")
+short_gps_nav_monthly.to_csv(out_root / "SHORT_gps_nav_monthly.csv")
+
+if RUN_DAILY:
+    long_baseline_nav_daily.to_csv(out_root / "LONG_baseline_nav_daily.csv")
+    long_gps_nav_daily.to_csv(out_root / "LONG_gps_nav_daily.csv")
+    short_baseline_nav_daily.to_csv(out_root / "SHORT_baseline_nav_daily.csv")
+    short_gps_nav_daily.to_csv(out_root / "SHORT_gps_nav_daily.csv")
+
+# === Top-1 selection CSVs (format: 1,date,baseline,gps) ===
+def write_top1_csv(top1_base: pd.Series, top1_gps: pd.Series, outfile: Path):
+    rows = []
+    for dt in pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS'):
+        b = str(top1_base.get(dt, "")) if top1_base is not None else ""
+        g = str(top1_gps.get(dt, "")) if top1_gps is not None else ""
+        rows.append([1, dt.date().isoformat(), b, g])
+    pd.DataFrame(rows, columns=['rank','date','baseline_ticker','gps_ticker']) \
+      .to_csv(outfile, index=False, header=False)
+
+write_top1_csv(long_top1_baseline,  long_top1_gps,  out_root / "Top1Selections_LONG.csv")
+write_top1_csv(short_top1_baseline, short_top1_gps, out_root / "Top1Selections_SHORT.csv")
 
 def _clip_plot_range(df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     return df[(df.index >= pd.Timestamp(start_dt)) & (df.index <= pd.Timestamp(end_dt))]
 
-def plot_pair_series(dates, y1, y2, title, ylabel, save_path):
+# === Utilities to compute total return for annotation ===
+def total_return_from_nav(nav: pd.Series) -> float:
+    """TR = last / first - 1 (first & last non-NaN)."""
+    if nav is None or nav.empty:
+        return np.nan
+    s = nav.dropna()
+    if s.empty:
+        return np.nan
+    first = float(s.iloc[0])
+    last  = float(s.iloc[-1])
+    if first == 0:
+        return np.nan
+    return (last / first) - 1.0
+
+def fmt_pct(x: float) -> str:
+    return ("{:+.2f}%".format(100.0 * x)) if np.isfinite(x) else "n/a"
+
+# Plot helpers — now with annotation box for monthly vs daily total returns
+def plot_four_series(dates, y_db, y_dg, y_mb_ff, y_mg_ff,
+                     title, ylabel, save_path,
+                     tr_mb_base=None, tr_mg_base=None, tr_db_base=None, tr_dg_base=None):
     plt.figure(figsize=(10,6))
-    plt.plot(dates, y1, label='Baseline (DVR only) - With Costs')
-    plt.plot(dates, y2, label='GPS-mapped (DVR) - With Costs')
-    plt.xlabel('Date')
-    plt.ylabel(ylabel)
-    plt.title(title)
+    if y_db is not None: plt.plot(dates, y_db, label='Baseline — Daily NAV (with costs)')
+    if y_mb_ff is not None: plt.plot(dates, y_mb_ff, label='Baseline — Monthly NAV (with costs)')
+    if y_dg is not None: plt.plot(dates, y_dg, label='GPS — Daily NAV (with costs)')
+    if y_mg_ff is not None: plt.plot(dates, y_mg_ff, label='GPS — Monthly NAV (with costs)')
+    plt.xlabel('Date'); plt.ylabel(ylabel); plt.title(title)
     ax = plt.gca()
     ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.xaxis.set_minor_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-    plt.legend()
-    plt.grid(True)
-    plt.xlim(PLOT_START, PLOT_END)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
+    plt.legend(); plt.grid(True); plt.xlim(PLOT_START, PLOT_END)
 
-# Plot each portfolio (LONG / SHORT) using daily series
-for k in range(1, NUM_T + 1):
+    # Build annotation text
+    lines = []
+    if tr_mb_base is not None and tr_mg_base is not None:
+        lines.append(f"Monthly NAV TR  — Base: {fmt_pct(tr_mb_base)}   GPS: {fmt_pct(tr_mg_base)}")
+    if tr_db_base is not None and tr_dg_base is not None:
+        lines.append(f"Daily NAV TR    — Base: {fmt_pct(tr_db_base)}   GPS: {fmt_pct(tr_dg_base)}")
+    if lines:
+        txt = "\n".join(lines)
+        ax.text(0.01, 0.99, txt, transform=ax.transAxes, va='top', ha='left',
+                fontsize=9, bbox=dict(facecolor='white', alpha=0.75, edgecolor='none'))
+
+    plt.tight_layout(); plt.savefig(save_path, dpi=300); plt.close()
+
+# Plot each portfolio (LONG / SHORT)
+for k in RANKS_TO_SIM:
     col = f'portfolio_{k}'
-    # LONG
-    bl = _clip_plot_range(long_baseline_nav_daily[[col]].dropna(how='all'), PLOT_START, PLOT_END)
-    gp = _clip_plot_range(long_gps_nav_daily[[col]].dropna(how='all'),       PLOT_START, PLOT_END)
-    idx = bl.index.union(gp.index).sort_values()
-    s1 = bl.reindex(idx)[col]
-    s2 = gp.reindex(idx)[col]
-    plot_pair_series(
-        dates=idx, y1=s1, y2=s2,
-        title=f'LONG Portfolio {k} - With Monthly Entry Costs',
+
+    # LONG — get monthly (original) series for TR calculation, and ffill version for plotting on daily axis
+    bl_m  = _clip_plot_range(long_baseline_nav_monthly[[col]].dropna(how='all'), PLOT_START, PLOT_END)
+    gp_m  = _clip_plot_range(long_gps_nav_monthly[[col]].dropna(how='all'),     PLOT_START, PLOT_END)
+    tr_mb_base = total_return_from_nav(bl_m[col])
+    tr_mg_base = total_return_from_nav(gp_m[col])
+
+    # base date index
+    idxL = bl_m.index.union(gp_m.index).sort_values()
+    y_mb = bl_m.reindex(idxL)[col]
+    y_mg = gp_m.reindex(idxL)[col]
+
+    if RUN_DAILY:
+        bl_d  = _clip_plot_range(long_baseline_nav_daily[[col]].dropna(how='all'),  PLOT_START, PLOT_END)
+        gp_d  = _clip_plot_range(long_gps_nav_daily[[col]].dropna(how='all'),       PLOT_START, PLOT_END)
+        tr_db_base = total_return_from_nav(bl_d[col])
+        tr_dg_base = total_return_from_nav(gp_d[col])
+        idxL = idxL.union(bl_d.index).union(gp_d.index).sort_values()
+        y_db = bl_d.reindex(idxL)[col]
+        y_dg = gp_d.reindex(idxL)[col]
+        # forward-fill monthly NAV to draw across days
+        y_mb_ff = y_mb.reindex(idxL).ffill()
+        y_mg_ff = y_mg.reindex(idxL).ffill()
+    else:
+        y_db = y_dg = None
+        y_mb_ff = y_mb  # plotted on monthly steps
+        y_mg_ff = y_mg
+        tr_db_base = tr_dg_base = None
+
+    plot_four_series(
+        dates=idxL,
+        y_db=y_db, y_dg=y_dg, y_mb_ff=y_mb_ff, y_mg_ff=y_mg_ff,
+        title=f'LONG Portfolio {k} — Daily vs Monthly Compounding (with Monthly Entry Costs)',
         ylabel='NAV (CHF)',
-        save_path=plot_dir_long / f'portfolio_{k}.png'
+        save_path=plot_dir_long / f'portfolio_{k}.png',
+        tr_mb_base=tr_mb_base, tr_mg_base=tr_mg_base, tr_db_base=tr_db_base, tr_dg_base=tr_dg_base
     )
 
-    # SHORT
-    bls = _clip_plot_range(short_baseline_nav_daily[[col]].dropna(how='all'), PLOT_START, PLOT_END)
-    gps = _clip_plot_range(short_gps_nav_daily[[col]].dropna(how='all'),      PLOT_START, PLOT_END)
-    idxs = bls.index.union(gps.index).sort_values()
-    s1s = bls.reindex(idxs)[col]
-    s2s = gps.reindex(idxs)[col]
-    plot_pair_series(
-        dates=idxs, y1=s1s, y2=s2s,
-        title=f'SHORT Portfolio {k} - With Monthly Entry Costs',
+    # SHORT — same
+    bls_m = _clip_plot_range(short_baseline_nav_monthly[[col]].dropna(how='all'), PLOT_START, PLOT_END)
+    gps_m = _clip_plot_range(short_gps_nav_monthly[[col]].dropna(how='all'),     PLOT_START, PLOT_END)
+    tr_mb_base_s = total_return_from_nav(bls_m[col])
+    tr_mg_base_s = total_return_from_nav(gps_m[col])
+
+    idxS = bls_m.index.union(gps_m.index).sort_values()
+    ys_mb = bls_m.reindex(idxS)[col]
+    ys_mg = gps_m.reindex(idxS)[col]
+
+    if RUN_DAILY:
+        bls_d = _clip_plot_range(short_baseline_nav_daily[[col]].dropna(how='all'),  PLOT_START, PLOT_END)
+        gps_d = _clip_plot_range(short_gps_nav_daily[[col]].dropna(how='all'),       PLOT_START, PLOT_END)
+        tr_db_base_s = total_return_from_nav(bls_d[col])
+        tr_dg_base_s = total_return_from_nav(gps_d[col])
+        idxS = idxS.union(bls_d.index).union(gps_d.index).sort_values()
+        ys_db = bls_d.reindex(idxS)[col]
+        ys_dg = gps_d.reindex(idxS)[col]
+        ys_mb_ff = ys_mb.reindex(idxS).ffill()
+        ys_mg_ff = ys_mg.reindex(idxS).ffill()
+    else:
+        ys_db = ys_dg = None
+        ys_mb_ff = ys_mb
+        ys_mg_ff = ys_mg
+        tr_db_base_s = tr_dg_base_s = None
+
+    plot_four_series(
+        dates=idxS,
+        y_db=ys_db, y_dg=ys_dg, y_mb_ff=ys_mb_ff, y_mg_ff=ys_mg_ff,
+        title=f'SHORT Portfolio {k} — Daily vs Monthly Compounding (with Monthly Entry Costs)',
         ylabel='NAV (CHF)',
-        save_path=plot_dir_short / f'portfolio_{k}.png'
+        save_path=plot_dir_short / f'portfolio_{k}.png',
+        tr_mb_base=tr_mb_base_s, tr_mg_base=tr_mg_base_s, tr_db_base=tr_db_base_s, tr_dg_base=tr_dg_base_s
     )
 
-print(f"\nSaved daily NAV CSVs and per-portfolio plots under:\n  {out_root}")
+print(f"\nSaved NAV CSVs and per-portfolio plots under:\n  {out_root}")
 print(f"  - LONG plots:  {plot_dir_long}")
 print(f"  - SHORT plots: {plot_dir_short}")
+print(f"  - Top-1 CSVs:  {out_root / 'Top1Selections_LONG.csv'} \n {out_root / 'Top1Selections_SHORT.csv'}")
