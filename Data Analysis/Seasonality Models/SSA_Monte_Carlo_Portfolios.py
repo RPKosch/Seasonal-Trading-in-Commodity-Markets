@@ -1,8 +1,17 @@
+# -*- coding: utf-8 -*-
+# Monte Carlo for SSA-based Top-1 (Baseline vs GPS), monthly compounding.
+# - SSA fit on LOG monthly returns (ranking)
+# - GPS metrics & compounding use SIMPLE monthly returns
+# - Optional EWMA scaling of SSA scores (score / sigma)
+#
+# Structure mirrors your DVR MC script: same helpers, reporting, IO layout,
+# just swapping DVR stats for SSA forecasts.
+
 import re
 import time
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
+import statsmodels.api as sm  # unused here but retained for parity with other files
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -17,15 +26,19 @@ from scipy import stats as st
 START_DATE              = datetime(2001, 1, 1)
 FINAL_END               = datetime(2024, 12, 31)
 
-LOOKBACK_YEARS          = 10                     # DVR lookback window
+LOOKBACK_YEARS          = 10                     # SSA lookback window
 SIM_YEARS               = 5                      # test window (2011-2015 given START_DATE)
 # Apply window is 2016-01 -> 2024-12 given the above
 
 START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025                 # apply ONCE per month
 
-# DVR params
-SIG_LEVEL               = 0.05                      # 1.0 ≡ no p-filter (GREEDY by Z); else significance-first
+# SSA params
+SSA_WINDOW              = 12                     # embedding dimension L
+SSA_COMPS               = 2                      # rank r (number of components)
+SSA_USE_EWMA_SCALE      = False                  # if True, use score/sigma (EWMA sigma of simple rets)
+SSA_EWMA_LAMBDA         = 0.94                   # alpha = 1 - lambda for EWMA scaling
+MIN_OBS_FOR_VOL         = 12
 
 # GPS switches
 GPS_ROLLING_ENABLED     = True                   # True=rolling 5y monthly re-calibration; False=fixed pre-apply
@@ -36,15 +49,15 @@ ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
 MC_RUNS                 = 5
-LAMBDA_EWMA             = 0.94
+LAMBDA_EWMA             = 0.94                   # for EWMA-projected sigma used in noise injection
 BACKCAST_N              = 12
 RNG_SEED                = 42
-SAVE_SERIES             = True                  # save Top-1 monthly series per run
-OUT_DIR_MC              = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}"
+SAVE_SERIES             = True                   # save Top-1 monthly series per run
+OUT_DIR_MC              = Path().resolve() / "Outputs_MC" / f"SSA_MC_{'EWMA' if SSA_USE_EWMA_SCALE else 'Raw'}"
 
 # NEW switches
 SAVE_TICKER_CHOICES_CSV = True                   # write a single CSV with chosen tickers per run & month
-ZERO_NOISE              = False                   # if True, set z_t = 0 (no randomness)
+ZERO_NOISE              = False                  # if True, set z_t = 0 (no randomness)
 
 # =============================== #
 # 2) DATE RANGES
@@ -144,75 +157,11 @@ def gps_harmonic_01(vals: list[float] | np.ndarray) -> float:
     if np.any(v == 0.0):  return 0.0
     return len(v) / np.sum(1.0 / v)
 
-def newey_west_lags(T: int) -> int:
-    """Rule of thumb: L = floor(0.75 * T^(1/3)), at least 1."""
-    return max(1, int(np.floor(0.75 * (T ** (1/3)))))
-
-def dvr_stats(monthly_series: pd.Series, forecast_month: pd.Timestamp,
-              lookback_years: int | None) -> tuple[float, float, float]:
-    """
-    For the target forecast month, run OLS with a dummy for that calendar month over the lookback window.
-    Return (beta, pval, zscore=t-stat, HAC Newey-West).
-    """
-    nm = forecast_month.month
-    df = monthly_series.loc[:(forecast_month - relativedelta(months=1))].to_frame('return')
-    if lookback_years is not None:
-        cutoff = forecast_month - relativedelta(years=lookback_years)
-        df = df[df.index >= cutoff]
-    if df.empty or df['return'].count() < 12:
-        return (np.nan, np.nan, np.nan)
-
-    df = df.copy()
-    df['month'] = df.index.month
-    df['D']     = (df['month'] == nm).astype(float)
-
-    X = sm.add_constant(df['D'])
-    L = newey_west_lags(len(df))
-    try:
-        model = sm.OLS(df['return'], X).fit(cov_type='HAC', cov_kwds={'maxlags': L})
-        beta   = float(model.params.get('D', np.nan))
-        pval   = float(model.pvalues.get('D', np.nan))
-        zscore = float(model.tvalues.get('D', np.nan))  # NW t-stat
-    except Exception:
-        beta, pval, zscore = (np.nan, np.nan, np.nan)
-    return (beta, pval, zscore)
-
-def _rank_greedy(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """SIG>=1: plain greedy by Z (longs: desc; shorts: asc)."""
-    orderL = dfm.sort_values('z', ascending=False).index.tolist()
-    orderS = dfm.sort_values('z', ascending=True ).index.tolist()
-    return orderL, orderS
-
-def _rank_sig_first(dfm: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """
-    Significance-first ranking that respects SIG_LEVEL.
-    """
-    df = dfm.copy()
-    df = df[np.isfinite(df['beta']) & np.isfinite(df['pval'])]
-    if df.empty:
-        return [], []
-
-    elig_long  = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] > 0)]
-    elig_short = df[(df['pval'] <= float(SIG_LEVEL)) & (df['beta'] < 0)]
-
-    rest_long  = df.loc[~df.index.isin(elig_long.index)]
-    rest_short = df.loc[~df.index.isin(elig_short.index)]
-
-    elig_long  = elig_long.sort_values('beta', ascending=False)
-    rest_long  = rest_long.sort_values('beta', ascending=False)
-
-    elig_short = elig_short.sort_values('beta', ascending=True)
-    rest_short = rest_short.sort_values('beta', ascending=True)
-
-    orderL = elig_long.index.tolist()  + [t for t in rest_long.index.tolist()  if t not in elig_long.index]
-    orderS = elig_short.index.tolist() + [t for t in rest_short.index.tolist() if t not in elig_short.index]
-    return orderL, orderS
-
 # =============================== #
 # 4) LOAD DATA
 # =============================== #
 base = ROOT_DIR
-# DVR runs on LOG monthly returns; GPS metrics/compounding use SIMPLE monthly returns
+# SSA is fit on LOG monthly returns; GPS metrics/compounding use SIMPLE monthly returns
 log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")
 simple_rets = load_returns(base / "All_Monthly_Return_Data")
 tickers     = list(log_rets.keys())
@@ -278,45 +227,125 @@ def log_to_simple_dict(log_rets_dict: dict[str, pd.Series]) -> dict[str, pd.Seri
     return {tkr: (np.exp(s.astype(float)) - 1.0).rename(tkr) for tkr, s in log_rets_dict.items()}
 
 # =============================== #
-# 6) DVR RANKINGS ON SIMULATED SERIES
+# 6) SSA CORE
 # =============================== #
-def build_rankings_from_log_rets(log_rets_sim: dict[str, pd.Series],
-                                 lookback_years: int) -> tuple[dict, dict, dict]:
+def compute_ssa_forecast(series: np.ndarray, L: int, r: int) -> float:
     """
-    Returns (long_rankings, short_rankings, z_scores_by_month) for all months TEST_SIM_START..FINAL_END.
+    Classic SSA one-step forecast:
+      1) Trajectory matrix X (L×K)
+      2) Covariance S = X X^T → eigendecomposition (top r)
+      3) Rank-r reconstruction Xr
+      4) Hankelize Xr to get rec (length N)
+      5) Linear recurrence from U: forecast = sum a_j * rec[N-j], j=1..L-1
+    Returns scalar forecast or np.nan on failure.
+    """
+    x = np.asarray(series, dtype=float).ravel()
+    N = x.size
+    if N < max(L, 3) or L <= 1 or L >= N or r < 1: return np.nan
+    if np.isnan(x).any(): return np.nan
+
+    K = N - L + 1
+    X = np.column_stack([x[i:i+L] for i in range(K)])  # L × K
+    S = X @ X.T
+    eigvals, eigvecs = np.linalg.eigh(S)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]; eigvecs = eigvecs[:, order]
+
+    eps = 1e-12
+    pos = eigvals > eps
+    if not np.any(pos): return np.nan
+    eigvals = eigvals[pos]; eigvecs = eigvecs[:, pos]
+
+    r_eff = int(min(r, eigvals.size))
+    U = eigvecs[:, :r_eff]
+    sigma = np.sqrt(eigvals[:r_eff])
+    V = (X.T @ U) / sigma
+
+    Xr = (U * sigma) @ V.T
+
+    # Hankelize
+    rec = np.zeros(N, dtype=float); cnt = np.zeros(N, dtype=float)
+    for i in range(L):
+        for j in range(K):
+            rec[i + j] += Xr[i, j]
+            cnt[i + j] += 1.0
+    if not np.all(cnt > 0): return np.nan
+    rec /= cnt
+
+    # recurrence from U
+    P_head = U[:-1, :]
+    pi     = U[-1, :]
+    nu2    = float(np.dot(pi, pi))
+    if 1.0 - nu2 <= 1e-10: return np.nan
+    R = (P_head @ pi) / (1.0 - nu2)   # (a_{L-1},...,a_1)
+    a = R[::-1]                       # (a_1,...,a_{L-1})
+
+    lags = rec[-1: -L: -1]
+    if lags.size != a.size: return np.nan
+    return float(np.dot(a, lags))
+
+# =============================== #
+# 7) SSA RANKINGS ON SIMULATED SERIES
+# =============================== #
+def build_ssa_rankings_from_log_rets(log_rets_sim: dict[str, pd.Series],
+                                     simple_rets_sim: dict[str, pd.Series],
+                                     lookback_years: int) -> tuple[dict, dict, dict]:
+    """
+    Returns (long_rankings, short_rankings, season_score_by_month) for all months TEST_SIM_START..FINAL_END.
     Only Top-1 will be used downstream.
     """
     tickers_sim = list(log_rets_sim)
     long_rankings, short_rankings = {}, {}
-    z_scores_by_month_sim = {}
+    season_score_by_month_sim = {}
+
     cur = TEST_SIM_START
     while cur <= FINAL_END:
         stats_rows = []
+        lb0 = cur - relativedelta(years=lookback_years)
+        lb1 = cur - relativedelta(months=1)
+
         for t in tickers_sim:
-            beta, pval, z = dvr_stats(log_rets_sim[t], cur, lookback_years)
-            if not np.isfinite(z):
+            s_log = log_rets_sim[t].loc[lb0:lb1].dropna()
+            if len(s_log) < SSA_WINDOW:
                 continue
-            elig = (np.isfinite(pval) and (pval <= float(SIG_LEVEL)))
-            stats_rows.append({'ticker': t, 'beta': beta, 'pval': pval, 'z': z, 'elig': elig})
+
+            ssa_val = compute_ssa_forecast(s_log.values, L=SSA_WINDOW, r=SSA_COMPS)
+
+            score = ssa_val
+            if SSA_USE_EWMA_SCALE and np.isfinite(ssa_val):
+                s_simple = simple_rets_sim.get(t, pd.Series()).loc[lb0:lb1].dropna()
+                if len(s_simple) >= MIN_OBS_FOR_VOL:
+                    alpha = 1.0 - SSA_EWMA_LAMBDA
+                    ewma_var = (s_simple.astype(float)**2).ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+                    sigma = float(np.sqrt(ewma_var)) if np.isfinite(ewma_var) else np.nan
+                    score = ssa_val / sigma if (sigma and np.isfinite(sigma) and sigma > 0) else np.nan
+                else:
+                    score = np.nan
+
+            if np.isfinite(score):
+                stats_rows.append({'ticker': t, 'score': float(score)})
+
         if not stats_rows:
             long_rankings[cur]  = tickers_sim.copy()
             short_rankings[cur] = tickers_sim.copy()
         else:
             dfm = pd.DataFrame(stats_rows).set_index('ticker')
-            z_scores_by_month_sim[cur] = dfm['z'].to_dict()
-            if float(SIG_LEVEL) >= 0.999999:
-                orderL, orderS = _rank_greedy(dfm)
-            else:
-                orderL, orderS = _rank_sig_first(dfm)
+            season_score_by_month_sim[cur] = dfm['score'].to_dict()
+
+            orderL = dfm.sort_values('score', ascending=False).index.tolist()
+            orderS = dfm.sort_values('score', ascending=True ).index.tolist()
+
             orderL += [t for t in tickers_sim if t not in orderL]
             orderS += [t for t in tickers_sim if t not in orderS]
             long_rankings[cur]  = orderL[:len(tickers_sim)]
             short_rankings[cur] = orderS[:len(tickers_sim)]
+
         cur += relativedelta(months=1)
-    return long_rankings, short_rankings, z_scores_by_month_sim
+
+    return long_rankings, short_rankings, season_score_by_month_sim
 
 # =============================== #
-# 7) TOP-1 MONTHLY SERIES (BASELINE & GPS)
+# 8) TOP-1 MONTHLY SERIES (BASELINE & GPS)
 # =============================== #
 def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
                          simple_rets_dict: dict[str, pd.Series],
@@ -353,16 +382,16 @@ def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
         return ret_ser, tkr_ser
     return ret_ser
 
-def compute_gps_mapping_for_month(dt: pd.Timestamp,
-                                  rankings: dict[pd.Timestamp, list[str]],
-                                  simple_rets_dict: dict[str, pd.Series],
-                                  z_scores_by_month: dict[pd.Timestamp, dict[str, float]],
-                                  *,
-                                  direction: str,
-                                  calib_years: int,
-                                  rolling: bool) -> dict[int, int]:
+def compute_gps_mapping_for_month_ssa(dt: pd.Timestamp,
+                                      rankings: dict[pd.Timestamp, list[str]],
+                                      simple_rets_dict: dict[str, pd.Series],
+                                      season_score_by_month: dict[pd.Timestamp, dict[str, float]],
+                                      *,
+                                      direction: str,
+                                      calib_years: int,
+                                      rolling: bool) -> dict[int, int]:
     """
-    Build GPS new->prev rank mapping for month dt.
+    Build GPS new->prev rank mapping for month dt (SSA version using SSA scores).
     Rolling: use [dt-5y, dt-1m]; Fixed: first 5y before FINAL_SIM_START.
     """
     if rolling:
@@ -378,14 +407,14 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
         return {1: 1}
 
     rets_nc = defaultdict(list)
-    z_by_prev_rank = defaultdict(list)
+    season_by_prev_rank = defaultdict(list)
     num_t = len(rankings.get(dt, []))
 
     for d in pd.date_range(win_start, win_end, freq='MS'):
         order_d = rankings.get(d)
         if not order_d:
             continue
-        zmap = z_scores_by_month.get(d, {})
+        s_map = season_score_by_month.get(d, {})
         for pr, tkr in enumerate(order_d, start=1):
             s = simple_rets_dict.get(tkr)
             if s is None or d not in s.index:
@@ -394,48 +423,46 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
             if direction == 'short':
                 r = (1.0 / (1.0 + r)) - 1.0
             rets_nc[pr].append(Decimal(str(r)))
-            zval = zmap.get(tkr, np.nan)
-            if direction == 'short':
-                zval = -zval if np.isfinite(zval) else zval
-            z_by_prev_rank[pr].append(float(zval) if np.isfinite(zval) else np.nan)
+
+            sc = s_map.get(tkr, np.nan)
+            if np.isfinite(sc):
+                sc = -float(sc) if direction == 'short' else float(sc)
+            season_by_prev_rank[pr].append(sc if np.isfinite(sc) else np.nan)
 
     rows = []
     for pr in range(1, num_t + 1):
-        sr  = sharpe_ratio(rets_nc.get(pr, []))
-        sor = sortino_ratio(rets_nc.get(pr, []))
-        cal = calmar_ratio(rets_nc.get(pr, []))
-        if float(SIG_LEVEL) >= 1.0:
-            z_list = np.asarray(z_by_prev_rank.get(pr, []), dtype=float)
-            seasonality_score = float(np.nanmean(z_list)) if np.isfinite(z_list).any() else np.nan
-        else:
-            seasonality_score = -float(pr)
-        rows.append({'prev_rank': pr, 'seasonality_score': seasonality_score,
-                     'sharpe': sr, 'sortino': sor, 'calmar': cal})
+        rows.append({'prev_rank': pr,
+                     'season':  float(np.nanmean(np.asarray(season_by_prev_rank.get(pr, []), dtype=float)))
+                                   if np.isfinite(np.asarray(season_by_prev_rank.get(pr, []), dtype=float)).any() else np.nan,
+                     'sharpe':  sharpe_ratio(rets_nc.get(pr, [])),
+                     'sortino': sortino_ratio(rets_nc.get(pr, [])),
+                     'calmar':  calmar_ratio(rets_nc.get(pr, []))})
     mdf = pd.DataFrame(rows).set_index('prev_rank').sort_index()
     if mdf.empty:
         return {1: 1}
-    for c in ['seasonality_score','sharpe','sortino','calmar']:
+    for c in ['season','sharpe','sortino','calmar']:
         mdf[f'{c}_01'] = minmax_01(mdf[c].values)
-    norm_cols = [f'{c}_01' for c in ['seasonality_score','sharpe','sortino','calmar']]
+    norm_cols = [f'{c}_01' for c in ['season','sharpe','sortino','calmar']]
     mdf['score'] = [gps_harmonic_01(mdf.loc[i, norm_cols].values) for i in mdf.index]
     mdf['new_rank'] = mdf['score'].rank(ascending=False, method='first')
+
     inv = {}
     for prev_rank, row in mdf.iterrows():
         nr = int(row['new_rank']); pr = int(prev_rank)
         if nr not in inv: inv[nr] = pr
     return inv
 
-def monthly_top1_returns_gps(rankings: dict[pd.Timestamp, list[str]],
-                             simple_rets_dict: dict[str, pd.Series],
-                             z_scores_by_month: dict[pd.Timestamp, dict[str, float]],
-                             *,
-                             direction: str,
-                             start_dt: pd.Timestamp,
-                             end_dt: pd.Timestamp,
-                             calib_years: int,
-                             rolling: bool,
-                             entry_cost: float,
-                             return_tickers: bool = False) -> pd.Series | tuple[pd.Series, pd.Series]:
+def monthly_top1_returns_gps_ssa(rankings: dict[pd.Timestamp, list[str]],
+                                 simple_rets_dict: dict[str, pd.Series],
+                                 season_score_by_month: dict[pd.Timestamp, dict[str, float]],
+                                 *,
+                                 direction: str,
+                                 start_dt: pd.Timestamp,
+                                 end_dt: pd.Timestamp,
+                                 calib_years: int,
+                                 rolling: bool,
+                                 entry_cost: float,
+                                 return_tickers: bool = False) -> pd.Series | tuple[pd.Series, pd.Series]:
     """
     TOP-1 ONLY: maps GPS new_rank=1 to a prev_rank, takes that single ticker's simple return.
     If return_tickers=True, also returns a Series of the chosen ticker strings (always recorded),
@@ -446,15 +473,15 @@ def monthly_top1_returns_gps(rankings: dict[pd.Timestamp, list[str]],
         order_today = rankings.get(dt)
         if not order_today:
             continue
-        mapping = compute_gps_mapping_for_month(
-            dt, rankings, simple_rets_dict, z_scores_by_month,
+        mapping = compute_gps_mapping_for_month_ssa(
+            dt, rankings, simple_rets_dict, season_score_by_month,
             direction=direction, calib_years=calib_years, rolling=rolling
         )
         prev_rank = mapping.get(1, 1)
         if prev_rank < 1 or prev_rank > len(order_today):
             continue
         tkr = order_today[prev_rank - 1]
-        out_tkr.append(tkr)  # record ticker regardless of available returns
+        out_tkr.append(tkr)
         s = simple_rets_dict.get(tkr)
         if s is None or dt not in s.index:
             r_wc = np.nan
@@ -471,7 +498,7 @@ def monthly_top1_returns_gps(rankings: dict[pd.Timestamp, list[str]],
     return ret_ser
 
 # =============================== #
-# 8) METRICS & WINDOWS
+# 9) METRICS & WINDOWS
 # =============================== #
 @dataclass
 class Perf:
@@ -520,13 +547,14 @@ def three_fixed_windows() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     return wins
 
 # =============================== #
-# 9) MONTE CARLO: BOTH DIRECTIONS (efficient)
+# 10) MONTE CARLO: BOTH DIRECTIONS (efficient)
 # =============================== #
 def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
     OUT_DIR_MC.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(RNG_SEED)
     t0 = time.time()
     print(f"Starting Monte Carlo (BOTH directions): runs={n_runs}, lambda={lam}, zero_noise={zero_noise}")
+    print(f"SSA ranking: L={SSA_WINDOW}, r={SSA_COMPS}, scale={'EWMA' if SSA_USE_EWMA_SCALE else 'Raw'}")
 
     # Precompute sigma projections once (used only if zero_noise=False)
     sigma_proj = None if zero_noise else precompute_sigma_proj_for_all(log_rets, lam=lam)
@@ -551,8 +579,8 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
         log_sim = simulate_log_returns_with_sigma(log_rets, sigma_proj, lam=lam, rng=rng, no_noise=zero_noise)
         simple_sim = simple_base_if_zero if simple_base_if_zero is not None else log_to_simple_dict(log_sim)
 
-        # 2) build rankings/z ONCE per run
-        L_rank, S_rank, z_by_month = build_rankings_from_log_rets(log_sim, LOOKBACK_YEARS)
+        # 2) build SSA rankings/season scores ONCE per run
+        L_rank, S_rank, season_by_month = build_ssa_rankings_from_log_rets(log_sim, simple_sim, LOOKBACK_YEARS)
 
         # 3) iterate BOTH directions using shared computations
         for direction, rank_use in (('long', L_rank), ('short', S_rank)):
@@ -562,8 +590,8 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                 start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
                 entry_cost=ENTRY_COST, return_tickers=True
             )
-            top1_gps, tkr_gps = monthly_top1_returns_gps(
-                rank_use, simple_sim, z_by_month, direction=direction,
+            top1_gps, tkr_gps = monthly_top1_returns_gps_ssa(
+                rank_use, simple_sim, season_by_month, direction=direction,
                 start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
                 calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
                 entry_cost=ENTRY_COST, return_tickers=True
@@ -665,7 +693,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
         print(f"MONTE CARLO — MONTHLY (N={n_runs_local}, λ={lam}, backcast={BACKCAST_N}, dir={direction}, zero_noise={zero_noise})")
         print("-"*96)
         print(f"Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
-              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()} | SIG_LEVEL={SIG_LEVEL}")
+              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()} | SSA(L={SSA_WINDOW}, r={SSA_COMPS}, scale={'EWMA' if SSA_USE_EWMA_SCALE else 'Raw'})")
         print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib_window={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST}")
         print("-"*96)
         print("Final outcome counts over apply period (Top-1 only):")
@@ -682,7 +710,6 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
             ab = agg(sub_metrics[direction]['baseline'][i])
             ag = agg(sub_metrics[direction]['gps'][i])
             print(f"  Window {i}: {s.date()} → {e.date()}")
-            # Ret stats & across-run variability; within-window monthly vol; and now SDs for CAGR/Sharpe/Calmar.
             print(f"    Baseline: Ret(mean)={ab['cum_ret_mean']:.4f}  Ret(median)={ab['cum_ret_median']:.4f}  "
                   f"RunSD={ab['cum_ret_std']:.4f}  Vol(within)={ab['stdev_mean']:.4f}  "
                   f"CAGR(mean)={ab['cagr_mean']:.4f} (sd={ab['cagr_std']:.4f})  "
@@ -717,7 +744,6 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
         else:
             print("  Calmar   : insufficient valid pairs.")
 
-        # Divider after LONG block
         if direction == 'long':
             print("")
             print("#" * 96)
@@ -727,7 +753,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
     print("="*96 + "\n")
 
 # =============================== #
-# 10) RUN — single efficient call
+# 11) RUN — single efficient call
 # =============================== #
 if __name__ == "__main__":
     run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)

@@ -14,7 +14,7 @@ LOOKBACK_YEARS  = 10                 # rolling history for RLSSA & EWMA vol
 FINAL_END       = datetime(2024, 12, 31)
 
 NUM_SELECT      = 1
-MODE            = "LongShort"            # "Long", "Short", or "LongShort"
+MODE            = "Long"            # "Long", "Short", or "LongShort"
 
 SSA_WINDOW      = 12
 SSA_COMPS       = 2                  # robust rank (q)
@@ -26,7 +26,7 @@ MIN_OBS_FOR_VOL = 12                 # minimum months for EWMA vol
 
 ENTRY_COST      = 0.0025             # apply at month entry when positions exist
 START_VALUE     = 1000.0
-PLOT_START, PLOT_END = datetime(2011, 1, 1), datetime(2024, 12, 31)
+PLOT_START, PLOT_END = datetime(2016, 1, 1), datetime(2024, 12, 31)
 
 VOLUME_THRESHOLD = 1000
 DEBUG_DATE      = datetime(2016, 1, 1)
@@ -220,7 +220,7 @@ simple_returns   = load_monthly_returns(base / "All_Monthly_Return_Data")
 
 rlssa_score = build_rlssa_history(log_returns)
 print(rlssa_score)
-tickers   = list(simple_returns)
+tickers   = list(log_returns)
 
 # First possible forecast date (after first 10y window)
 initial_lb_end       = (START_DATE + relativedelta(years=LOOKBACK_YEARS) - pd.offsets.MonthEnd(1))
@@ -489,7 +489,8 @@ print(tot_nc)
 scale_tag = "EWMA94" if USE_EWMA_SCALE else "RAW"
 title_str = f"RLSSA_{scale_tag}_{MODE}_Portfolio_{NUM_SELECT}_LB_{LOOKBACK_YEARS}Y.png"
 
-output_dir = Path("plots/RLSSA_Plots")
+#output_dir = Path("plots/RLSSA_Plots")
+output_dir = Path("plots/Additional_Plots"); output_dir.mkdir(exist_ok=True)
 output_dir.mkdir(exist_ok=True)
 
 plt.figure(figsize=(10,6))
@@ -502,8 +503,8 @@ plt.xlim(PLOT_START, PLOT_END)
 plt.tight_layout()
 #plt.show()
 
-#save_path = output_dir / title_str
-#plt.savefig(save_path, dpi=300)
+save_path = output_dir / title_str
+plt.savefig(save_path, dpi=300)
 
 # --- export daily CSVs in a separate folder ---
 csv_out_dir = output_dir / "RLSSA_Daily"
