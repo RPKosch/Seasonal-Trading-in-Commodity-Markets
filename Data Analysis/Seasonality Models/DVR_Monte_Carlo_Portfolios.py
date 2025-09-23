@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-# DVR + GPS Monte Carlo (Monthly Only) — Self-contained, Top-1 only, medians added, new significance tests
-# Adds:
-#   • SAVE_TICKER_CHOICES_CSV flag to dump which ticker was chosen each month in each MC run
-#   • ZERO_NOISE flag to disable randomness (no noise added)
-#   • Progress prints every 10 runs + total runtime timer
-
 import re
 import time
 import numpy as np
@@ -42,17 +35,16 @@ GPS_CALIB_YEARS         = SIM_YEARS
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 1
+MC_RUNS                 = 5
 LAMBDA_EWMA             = 0.94
 BACKCAST_N              = 12
 RNG_SEED                = 42
-DIRECTION               = 'long'                 # 'long' or 'short'
 SAVE_SERIES             = False                  # save Top-1 monthly series per run
 OUT_DIR_MC              = Path().resolve() / "Outputs" / "MC_Monthly"
 
 # NEW switches
 SAVE_TICKER_CHOICES_CSV = True                   # write a single CSV with chosen tickers per run & month
-ZERO_NOISE              = True                  # if True, set z_t = 0 (no randomness)
+ZERO_NOISE              = True                   # if True, set z_t = 0 (no randomness)
 
 # =============================== #
 # 2) DATE RANGES
@@ -253,15 +245,22 @@ def ewma_projected_sigma_series(log_series: pd.Series,
         prev_sigma = np.sqrt(lam * (prev_sigma**2) + (1 - lam) * (arr[k]**2))
     return pd.Series(sig_proj, index=s.index)
 
-def simulate_log_returns_with_ewma_noise(log_rets_dict: dict[str, pd.Series],
-                                         lam=LAMBDA_EWMA,
-                                         rng: np.random.Generator | None = None,
-                                         no_noise: bool = False
-                                         ) -> dict[str, pd.Series]:
+def precompute_sigma_proj_for_all(log_rets_dict: dict[str, pd.Series], lam=LAMBDA_EWMA) -> dict[str, np.ndarray]:
+    """Precompute σ_proj arrays once per ticker."""
+    return {tkr: ewma_projected_sigma_series(s, lam=lam).values for tkr, s in log_rets_dict.items()}
+
+def simulate_log_returns_with_sigma(log_rets_dict: dict[str, pd.Series],
+                                    sigma_proj: dict[str, np.ndarray] | None,
+                                    lam=LAMBDA_EWMA,
+                                    rng: np.random.Generator | None = None,
+                                    no_noise: bool = False) -> dict[str, pd.Series]:
     """
     r_sim(t) = r_base(t) + σ_proj(t) * z_t,  z_t ~ N(0,1) iid per ticker.
-    If no_noise=True, z_t ≡ 0 (deterministic, no perturbation).
+    If no_noise=True, returns base log series (no perturbation).
+    If sigma_proj is None, compute on the fly (fallback).
     """
+    if no_noise:
+        return {tkr: s.dropna().sort_index().astype(float).copy() for tkr, s in log_rets_dict.items()}
     if rng is None:
         rng = np.random.default_rng()
     sim = {}
@@ -269,11 +268,8 @@ def simulate_log_returns_with_ewma_noise(log_rets_dict: dict[str, pd.Series],
         s = s.dropna().sort_index().astype(float)
         if s.empty:
             continue
-        sig = ewma_projected_sigma_series(s, lam=lam).values
-        if no_noise:
-            z = np.zeros(len(s), dtype=float)
-        else:
-            z = rng.standard_normal(len(s))
+        sig = sigma_proj[tkr] if sigma_proj and tkr in sigma_proj else ewma_projected_sigma_series(s, lam=lam).values
+        z = rng.standard_normal(len(s))
         r_sim = s.values + sig * z
         sim[tkr] = pd.Series(r_sim, index=s.index)
     return sim
@@ -342,7 +338,6 @@ def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
             continue
         top = order[0]
         s = simple_rets_dict.get(top)
-        # record ticker regardless of available returns
         out_tkr.append(top)
         if s is None or dt not in s.index:
             r_wc = np.nan
@@ -525,106 +520,106 @@ def three_fixed_windows() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     return wins
 
 # =============================== #
-# 9) MONTE CARLO MAIN (MONTHLY ONLY)
+# 9) MONTE CARLO: BOTH DIRECTIONS (efficient)
 # =============================== #
-def run_monte_carlo_monthly(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
+def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
     OUT_DIR_MC.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(RNG_SEED)
-
-    # timer
     t0 = time.time()
-    print(f"Starting Monte Carlo: runs={n_runs}, lambda={lam}, zero_noise={zero_noise}")
+    print(f"Starting Monte Carlo (BOTH directions): runs={n_runs}, lambda={lam}, zero_noise={zero_noise}")
 
-    full_metrics = {'baseline': [], 'gps': []}
-    sub_metrics  = {'baseline': defaultdict(list), 'gps': defaultdict(list)}
-    pos_counts   = {'baseline': 0, 'gps': 0}
-    neg_counts   = {'baseline': 0, 'gps': 0}
+    # Precompute sigma projections once (used only if zero_noise=False)
+    sigma_proj = None if zero_noise else precompute_sigma_proj_for_all(log_rets, lam=lam)
 
-    # accumulate ticker choices (long-form): run, date, baseline_ticker, gps_ticker
-    choice_records = []
+    # Static grids
+    month_grid = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
+    splits = three_fixed_windows()
 
-    splits = three_fixed_windows()  # 2016–18, 2019–21, 2022–24
+    # Aggregators per direction
+    dirs = ('long', 'short')
+    full_metrics = {d: {'baseline': [], 'gps': []} for d in dirs}
+    sub_metrics = {d: {'baseline': defaultdict(list), 'gps': defaultdict(list)} for d in dirs}
+    pos_counts = {d: {'baseline': 0, 'gps': 0} for d in dirs}
+    neg_counts = {d: {'baseline': 0, 'gps': 0} for d in dirs}
+    choice_records = []  # unified CSV with 'direction' column
+
+    # If zero_noise, the simulated logs are just base logs; compute simple once
+    simple_base_if_zero = log_to_simple_dict(log_rets) if zero_noise else None
 
     for run in range(1, n_runs + 1):
-        # 1) simulate log returns with EWMA noise added to base log series
-        log_sim = simulate_log_returns_with_ewma_noise(log_rets, lam=lam, rng=rng, no_noise=zero_noise)
-        simple_sim = log_to_simple_dict(log_sim)
+        # 1) simulate (or reuse base) ONCE per run
+        log_sim = simulate_log_returns_with_sigma(log_rets, sigma_proj, lam=lam, rng=rng, no_noise=zero_noise)
+        simple_sim = simple_base_if_zero if simple_base_if_zero is not None else log_to_simple_dict(log_sim)
 
-        # 2) recompute rankings/z on *simulated* logs with SAME lookback & SIG_LEVEL
+        # 2) build rankings/z ONCE per run
         L_rank, S_rank, z_by_month = build_rankings_from_log_rets(log_sim, LOOKBACK_YEARS)
-        rank_use = S_rank if DIRECTION == 'short' else L_rank
 
-        # 3) Top-1 monthly series (Baseline and GPS) over apply window, also capture chosen tickers
-        top1_baseline, top1_tickers_baseline = monthly_top1_returns(
-            rank_use, simple_sim, direction=DIRECTION,
-            start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-            entry_cost=ENTRY_COST, return_tickers=True
-        )
+        # 3) iterate BOTH directions using shared computations
+        for direction, rank_use in (('long', L_rank), ('short', S_rank)):
+            # Baseline + GPS top-1 series
+            top1_baseline, tkr_baseline = monthly_top1_returns(
+                rank_use, simple_sim, direction=direction,
+                start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
+                entry_cost=ENTRY_COST, return_tickers=True
+            )
+            top1_gps, tkr_gps = monthly_top1_returns_gps(
+                rank_use, simple_sim, z_by_month, direction=direction,
+                start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
+                calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
+                entry_cost=ENTRY_COST, return_tickers=True
+            )
 
-        top1_gps, top1_tickers_gps = monthly_top1_returns_gps(
-            rank_use, simple_sim, z_by_month, direction=DIRECTION,
-            start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-            calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
-            entry_cost=ENTRY_COST, return_tickers=True
-        )
+            # NAV series (for CSV context)
+            nav_baseline = nav_from_returns_on_grid(top1_baseline, START_VALUE, month_grid)
+            nav_gps      = nav_from_returns_on_grid(top1_gps,      START_VALUE, month_grid)
 
-        # Build full monthly grid for apply window
-        month_grid = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
+            # Save choices in unified long-form
+            if SAVE_TICKER_CHOICES_CSV:
+                for dt in month_grid:
+                    choice_records.append({
+                        'direction': direction,
+                        'run': run,
+                        'date': dt.date().isoformat(),
+                        'baseline_ticker': tkr_baseline.get(dt, np.nan) if not tkr_baseline.empty else np.nan,
+                        'gps_ticker': tkr_gps.get(dt, np.nan) if not tkr_gps.empty else np.nan,
+                        'baseline_value': float(nav_baseline.get(dt, np.nan)),
+                        'gps_value': float(nav_gps.get(dt, np.nan)),
+                    })
 
-        # Running NAV (value) series for Baseline and GPS over the whole period
-        nav_baseline = nav_from_returns_on_grid(top1_baseline, START_VALUE, month_grid)
-        nav_gps = nav_from_returns_on_grid(top1_gps, START_VALUE, month_grid)
+            # Optional per-run series (direction-tagged folders)
+            if save_series:
+                ddir = OUT_DIR_MC / f"{direction}_run_{run:03d}"
+                ddir.mkdir(parents=True, exist_ok=True)
+                top1_baseline.to_csv(ddir / "top1_baseline_monthly.csv")
+                top1_gps.to_csv(ddir / "top1_gps_monthly.csv")
 
-        # 3b) accumulate ticker choices (always use month grid to be explicit)
-        if SAVE_TICKER_CHOICES_CSV:
-            for dt in month_grid:
-                choice_records.append({
-                    'run': run,
-                    'date': dt.date().isoformat(),
-                    'baseline_ticker': top1_tickers_baseline.get(dt,
-                                                                 np.nan) if not top1_tickers_baseline.empty else np.nan,
-                    'gps_ticker': top1_tickers_gps.get(dt, np.nan) if not top1_tickers_gps.empty else np.nan,
-                    # NEW: running portfolio values
-                    'baseline_value': float(nav_baseline.get(dt, np.nan)),
-                    'gps_value': float(nav_gps.get(dt, np.nan)),
-                })
+            # Full-period metrics
+            pb, pg = perf_from_monthly(top1_baseline), perf_from_monthly(top1_gps)
+            full_metrics[direction]['baseline'].append(pb)
+            full_metrics[direction]['gps'].append(pg)
+            pos_counts[direction]['baseline'] += int(pb.cum_ret > 0)
+            neg_counts[direction]['baseline'] += int(pb.cum_ret <= 0)
+            pos_counts[direction]['gps']      += int(pg.cum_ret > 0)
+            neg_counts[direction]['gps']      += int(pg.cum_ret <= 0)
 
-        # 4) save Top-1 monthly series (optional)
-        if save_series:
-            ddir = OUT_DIR_MC / f"run_{run:03d}"
-            ddir.mkdir(parents=True, exist_ok=True)
-            top1_baseline.to_csv(ddir / "top1_baseline_monthly.csv")
-            top1_gps.to_csv(ddir / "top1_gps_monthly.csv")
-
-        # 5) full-period metrics (Top-1 only)
-        pb, pg = perf_from_monthly(top1_baseline), perf_from_monthly(top1_gps)
-        full_metrics['baseline'].append(pb)
-        full_metrics['gps'].append(pg)
-
-        pos_counts['baseline'] += int(pb.cum_ret > 0)
-        neg_counts['baseline'] += int(pb.cum_ret <= 0)
-        pos_counts['gps']      += int(pg.cum_ret > 0)
-        neg_counts['gps']      += int(pg.cum_ret <= 0)
-
-        # 6) subperiod metrics (three fixed 3y windows)
-        for i, (s, e) in enumerate(splits, start=1):
-            sb = top1_baseline[(top1_baseline.index >= s) & (top1_baseline.index <= e)]
-            sg = top1_gps[(top1_gps.index >= s) & (top1_gps.index <= e)]
-            sub_metrics['baseline'][i].append(perf_from_monthly(sb))
-            sub_metrics['gps'][i].append(perf_from_monthly(sg))
+            # Subperiod metrics
+            for i, (s, e) in enumerate(splits, start=1):
+                sb = top1_baseline[(top1_baseline.index >= s) & (top1_baseline.index <= e)]
+                sg = top1_gps[(top1_gps.index >= s) & (top1_gps.index <= e)]
+                sub_metrics[direction]['baseline'][i].append(perf_from_monthly(sb))
+                sub_metrics[direction]['gps'][i].append(perf_from_monthly(sg))
 
         # progress
         if (run % 10) == 0:
             elapsed = time.time() - t0
             print(f"  Completed {run}/{n_runs} runs | elapsed {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
 
-    # write ticker choices CSV (single file, long-form)
+    # Write unified choices CSV
     if SAVE_TICKER_CHOICES_CSV and choice_records:
-        OUT_DIR_MC.mkdir(parents=True, exist_ok=True)
         df_choices = pd.DataFrame(choice_records)
         df_choices.to_csv(OUT_DIR_MC / "top1_ticker_choices_all_runs.csv", index=False)
 
-    # === Aggregate & report ===
+    # === Reporting helpers ===
     def agg(perf_list: list[Perf]) -> dict[str, float]:
         out = {}
         for k in ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']:
@@ -634,10 +629,6 @@ def run_monte_carlo_monthly(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SE
             out[f'{k}_std']    = float(np.nanstd(x, ddof=1))
         return out
 
-    agg_full_b = agg(full_metrics['baseline'])
-    agg_full_g = agg(full_metrics['gps'])
-
-    # Paired, one-sided tests (H1: GPS > Baseline) on Return (CumRet), CAGR, Sortino, Calmar
     def paired_test(b_list: list[Perf], g_list: list[Perf], attr: str):
         b = np.array([getattr(p, attr) for p in b_list], float)
         g = np.array([getattr(p, attr) for p in g_list], float)
@@ -647,23 +638,6 @@ def run_monte_carlo_monthly(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SE
         t, p = st.ttest_rel(g[mask], b[mask], alternative='greater')
         return float(t), float(p), int(mask.sum())
 
-    t_ret,    p_ret,    n_ret    = paired_test(full_metrics['baseline'], full_metrics['gps'], 'cum_ret')
-    t_cagr,   p_cagr,   n_cagr   = paired_test(full_metrics['baseline'], full_metrics['gps'], 'cagr')
-    t_sort,   p_sort,   n_sort   = paired_test(full_metrics['baseline'], full_metrics['gps'], 'sortino')
-    t_calmar, p_calmar, n_calmar = paired_test(full_metrics['baseline'], full_metrics['gps'], 'calmar')
-
-    print("\n" + "="*96)
-    print(f"MONTE CARLO — MONTHLY (N={MC_RUNS}, λ={LAMBDA_EWMA}, backcast={BACKCAST_N}, dir={DIRECTION}, zero_noise={zero_noise})")
-    print("-"*96)
-    print(f"Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
-          f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()} | SIG_LEVEL={SIG_LEVEL}")
-    print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib_window={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST}")
-    print("-"*96)
-    print("Final outcome counts over apply period (Top-1 only):")
-    print(f"  Baseline : +{pos_counts['baseline']:3d}   -{neg_counts['baseline']:3d}")
-    print(f"  GPS      : +{pos_counts['gps']:3d}   -{neg_counts['gps']:3d}")
-    print("-"*96)
-
     def pretty_full(d, name):
         print(f"{name} — FULL PERIOD across runs (Top-1 only):")
         print(f"  CumRet   mean={d['cum_ret_mean']:.4f}  median={d['cum_ret_median']:.4f}  sd={d['cum_ret_std']:.4f}")
@@ -672,51 +646,88 @@ def run_monte_carlo_monthly(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SE
         print(f"  Sortino  mean={d['sortino_mean']:.3f} median={d['sortino_median']:.3f} sd={d['sortino_std']:.3f}")
         print(f"  Calmar   mean={d['calmar_mean']:.3f}  median={d['calmar_median']:.3f}  sd={d['calmar_std']:.3f}")
         print(f"  MDD      mean={d['mdd_mean']:.3f}     median={d['mdd_median']:.3f}     sd={d['mdd_std']:.3f}")
-        print(f"  Std(mon) mean={d['stdev_mean']:.4f}   median={d['stdev_median']:.4f}   sd={d['stdev_std']:.4f}")
-    pretty_full(agg_full_b, "BASELINE")
-    pretty_full(agg_full_g, "GPS")
+        print(f"  Vol(within) mean={d['stdev_mean']:.4f}   median={d['stdev_median']:.4f}   RunSD={d['stdev_std']:.4f}")
 
-    print("-"*96)
-    print("Three fixed 3-year subperiod statistics across runs (Top-1 only):")
-    splits = three_fixed_windows()
-    for i, (s, e) in enumerate(splits, start=1):
-        ab = agg(sub_metrics['baseline'][i])
-        ag = agg(sub_metrics['gps'][i])
-        print(f"  Window {i}: {s.date()} → {e.date()}")
-        # Return & Std (mean & median), CAGR/Sharpe/Calmar means
-        print(f"    Baseline: Ret(mean)={ab['cum_ret_mean']:.4f}  Ret(median)={ab['cum_ret_median']:.4f}  "
-              f"Std(mean)={ab['stdev_mean']:.4f}  Std(median)={ab['stdev_median']:.4f}  "
-              f"CAGR={ab['cagr_mean']:.4f}  Sharpe={ab['sharpe_mean']:.3f}  Calmar={ab['calmar_mean']:.3f}")
-        print(f"    GPS     : Ret(mean)={ag['cum_ret_mean']:.4f}  Ret(median)={ag['cum_ret_median']:.4f}  "
-              f"Std(mean)={ag['stdev_mean']:.4f}  Std(median)={ag['stdev_median']:.4f}  "
-              f"CAGR={ag['cagr_mean']:.4f}  Sharpe={ag['sharpe_mean']:.3f}  Calmar={ag['calmar_mean']:.3f}")
+    # === Print LONG first, divider, then SHORT ===
+    for direction in ('long', 'short'):
+        n_runs_local = n_runs
+        agg_full_b = agg(full_metrics[direction]['baseline'])
+        agg_full_g = agg(full_metrics[direction]['gps'])
 
-    print("-"*96)
-    print("Significance (paired, one-sided H1: GPS > Baseline) — full apply period, Top-1 only:")
-    if n_ret >= 3:
-        print(f"  Return   : t={t_ret:.3f},   p={p_ret:.4f}   -> {'GPS better at 5%' if p_ret is not None and p_ret < 0.05 else 'no sig diff at 5%'}")
-    else:
-        print("  Return   : insufficient valid pairs.")
-    if n_cagr >= 3:
-        print(f"  CAGR     : t={t_cagr:.3f},  p={p_cagr:.4f}  -> {'GPS better at 5%' if p_cagr is not None and p_cagr < 0.05 else 'no sig diff at 5%'}")
-    else:
-        print("  CAGR     : insufficient valid pairs.")
-    if n_sort >= 3:
-        print(f"  Sortino  : t={t_sort:.3f},  p={p_sort:.4f}  -> {'GPS better at 5%' if p_sort is not None and p_sort < 0.05 else 'no sig diff at 5%'}")
-    else:
-        print("  Sortino  : insufficient valid pairs.")
-    if n_calmar >= 3:
-        print(f"  Calmar   : t={t_calmar:.3f}, p={p_calmar:.4f} -> {'GPS better at 5%' if p_calmar is not None and p_calmar < 0.05 else 'no sig diff at 5%'}")
-    else:
-        print("  Calmar   : insufficient valid pairs.")
+        # add Sharpe to the significance battery
+        t_ret,    p_ret,    n_ret    = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'cum_ret')
+        t_cagr,   p_cagr,   n_cagr   = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'cagr')
+        t_sharpe, p_sharpe, n_sharpe = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'sharpe')
+        t_sort,   p_sort,   n_sort   = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'sortino')
+        t_calmar, p_calmar, n_calmar = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'calmar')
 
-    # total runtime
+        print("\n" + "="*96)
+        print(f"MONTE CARLO — MONTHLY (N={n_runs_local}, λ={lam}, backcast={BACKCAST_N}, dir={direction}, zero_noise={zero_noise})")
+        print("-"*96)
+        print(f"Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
+              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()} | SIG_LEVEL={SIG_LEVEL}")
+        print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib_window={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST}")
+        print("-"*96)
+        print("Final outcome counts over apply period (Top-1 only):")
+        print(f"  Baseline : +{pos_counts[direction]['baseline']:3d}   -{neg_counts[direction]['baseline']:3d}")
+        print(f"  GPS      : +{pos_counts[direction]['gps']:3d}   -{neg_counts[direction]['gps']:3d}")
+        print("-"*96)
+
+        pretty_full(agg_full_b, "BASELINE")
+        pretty_full(agg_full_g, "GPS")
+
+        print("-"*96)
+        print("Three fixed 3-year subperiod statistics across runs (Top-1 only):")
+        for i, (s, e) in enumerate(splits, start=1):
+            ab = agg(sub_metrics[direction]['baseline'][i])
+            ag = agg(sub_metrics[direction]['gps'][i])
+            print(f"  Window {i}: {s.date()} → {e.date()}")
+            # Ret stats & across-run variability; within-window monthly vol; and now SDs for CAGR/Sharpe/Calmar.
+            print(f"    Baseline: Ret(mean)={ab['cum_ret_mean']:.4f}  Ret(median)={ab['cum_ret_median']:.4f}  "
+                  f"RunSD={ab['cum_ret_std']:.4f}  Vol(within)={ab['stdev_mean']:.4f}  "
+                  f"CAGR(mean)={ab['cagr_mean']:.4f} (sd={ab['cagr_std']:.4f})  "
+                  f"Sharpe(mean)={ab['sharpe_mean']:.3f} (sd={ab['sharpe_std']:.3f})  "
+                  f"Calmar(mean)={ab['calmar_mean']:.3f} (sd={ab['calmar_std']:.3f})")
+            print(f"    GPS     : Ret(mean)={ag['cum_ret_mean']:.4f}  Ret(median)={ag['cum_ret_median']:.4f}  "
+                  f"RunSD={ag['cum_ret_std']:.4f}  Vol(within)={ag['stdev_mean']:.4f}  "
+                  f"CAGR(mean)={ag['cagr_mean']:.4f} (sd={ag['cagr_std']:.4f})  "
+                  f"Sharpe(mean)={ag['sharpe_mean']:.3f} (sd={ag['sharpe_std']:.3f})  "
+                  f"Calmar(mean)={ag['calmar_mean']:.3f} (sd={ag['calmar_std']:.3f})")
+
+        print("-"*96)
+        print("Significance (paired, one-sided H1: GPS > Baseline) — full apply period, Top-1 only:")
+        if n_ret >= 3:
+            print(f"  Return   : t={t_ret:.3f},   p={p_ret:.4f}   -> {'GPS better at 5%' if p_ret is not None and p_ret < 0.05 else 'no sig diff at 5%'}")
+        else:
+            print("  Return   : insufficient valid pairs.")
+        if n_cagr >= 3:
+            print(f"  CAGR     : t={t_cagr:.3f},  p={p_cagr:.4f}  -> {'GPS better at 5%' if p_cagr is not None and p_cagr < 0.05 else 'no sig diff at 5%'}")
+        else:
+            print("  CAGR     : insufficient valid pairs.")
+        if n_sharpe >= 3:
+            print(f"  Sharpe   : t={t_sharpe:.3f},  p={p_sharpe:.4f}  -> {'GPS better at 5%' if p_sharpe is not None and p_sharpe < 0.05 else 'no sig diff at 5%'}")
+        else:
+            print("  Sharpe   : insufficient valid pairs.")
+        if n_sort >= 3:
+            print(f"  Sortino  : t={t_sort:.3f},  p={p_sort:.4f}  -> {'GPS better at 5%' if p_sort is not None and p_sort < 0.05 else 'no sig diff at 5%'}")
+        else:
+            print("  Sortino  : insufficient valid pairs.")
+        if n_calmar >= 3:
+            print(f"  Calmar   : t={t_calmar:.3f}, p={p_calmar:.4f} -> {'GPS better at 5%' if p_calmar is not None and p_calmar < 0.05 else 'no sig diff at 5%'}")
+        else:
+            print("  Calmar   : insufficient valid pairs.")
+
+        # Divider after LONG block
+        if direction == 'long':
+            print("")
+            print("#" * 96)
+
     total_elapsed = time.time() - t0
-    print(f"Total runtime: {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}")
+    print(f"Total runtime (both directions): {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}")
     print("="*96 + "\n")
 
 # =============================== #
-# 10) RUN
+# 10) RUN — single efficient call
 # =============================== #
 if __name__ == "__main__":
-    run_monte_carlo_monthly(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)
+    run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)
