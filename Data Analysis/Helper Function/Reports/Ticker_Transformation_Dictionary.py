@@ -13,7 +13,14 @@ futures_dict = {
     "SV": "Silver 5000 oz",
     "ZC": "Corn (Globex)",
     "ZS": "Soybeans (Globex)",
-    "ZW": "Wheat (Globex)"
+    "ZW": "Wheat (Globex)",
+    
+    "GF": "Feeder Cattle (Globex)",
+    "ZL": "Soybean Oil (Globex)",
+    "ZM": "Soybean Meal (Globex)",
+    "ZO": "Oats (Globex)",
+    "ZR": "Rough Rice (Globex)",
 }
+
 
 

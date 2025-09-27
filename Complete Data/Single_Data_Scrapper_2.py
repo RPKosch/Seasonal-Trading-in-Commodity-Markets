@@ -120,7 +120,11 @@ if __name__ == "__main__":
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-        2017: [5],
+    2000: [10],
+    2002: [5],
+    2008: [6],
+    2011: [9],
+    2025: [9],
     }
     # ======================
 

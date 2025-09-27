@@ -117,9 +117,15 @@ def main(
     else:
         print("\nAll requested months fetched successfully!")
 
+#    "GF": "Feeder Cattle (Globex)",
+#    "ZL": "Soybean Oil (Globex)",
+#    "ZM": "Soybean Meal (Globex)",
+#    "ZO": "Oats (Globex)",
+#    "ZR": "Rough Rice (Globex)",
+
 if __name__ == "__main__":
     main(
-        underlying="ZW",
+        underlying="GF",
         start_year=1999,
         end_year=2025,
         months_to_check=None,
