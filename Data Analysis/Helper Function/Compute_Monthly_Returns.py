@@ -17,6 +17,13 @@ LOST_TICKERS = ["PA", "PL"]
 
 TICKERS         = ["CC", "CF", "CO", "CP", "CT", "ZW", "GD", "HE", "HO",
                    "LE", "NG", "ZS", "SU", "SV", "ZC"]
+
+TICKERS         = ["CC","CF","CO","CP","GD","LE","NG","ZS","SU","ZC","GF","ZL","ZM","ZO","ZR"]
+
+TICKERS         = ["GF", "ZL", "ZM", "ZO", "ZR"]
+
+#Drop: HO (dup. with crude), SV (dup. with gold), HE (livestock overlap), CT (free a softs slot), ZW (to offset heavier soy complex)
+
 START_YEAR      = 2001
 START_MONTH     = 1
 END_YEAR        = 2025
@@ -156,7 +163,7 @@ def compute_return_for_month(data_root: Path, ticker: str, year: int, month: int
 def main():
     project_root = Path().resolve().parent.parent
     data_root    = project_root / "Complete Data"
-    folder_name  = "All_Monthly_Log_Return_Data" if USE_LOG_RETURNS else "All_Monthly_Return_Data"
+    folder_name  = "All_Monthly_Log_Return_Data_P2" if USE_LOG_RETURNS else "All_Monthly_Return_Data_P2"
     output_dir   = data_root / folder_name
     output_dir.mkdir(parents=True, exist_ok=True)
 

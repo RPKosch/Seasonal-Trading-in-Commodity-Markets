@@ -115,16 +115,32 @@ def main(
         print("\nAll requested months fetched successfully!")
 
 if __name__ == "__main__":
-    # === configure here ===
-    UNDERLYING     = "ZW"
+    UNDERLYING     = "ZL"
     BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
     OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
     YEAR_MONTH_MAP = {
-    2000: [10],
-    2002: [5],
-    2008: [6],
-    2011: [9],
-    2025: [9],
+        2020: [3],
+    }
+    # ======================
+
+    main(UNDERLYING, OUTPUT_FOLDER, YEAR_MONTH_MAP)
+
+    UNDERLYING     = "ZM"
+    BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
+    OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
+    YEAR_MONTH_MAP = {
+        2003: [3],
+        2021: [1],
+    }
+    # ======================
+
+    main(UNDERLYING, OUTPUT_FOLDER, YEAR_MONTH_MAP)
+
+    UNDERLYING     = "ZO"
+    BASE_DIR       = r"C:\Users\ralph\PycharmProjects\Seasonal-Trading-in-Commodity-Markets\Complete Data"
+    OUTPUT_FOLDER  = os.path.join(BASE_DIR, f"{UNDERLYING}_Historic_Data")
+    YEAR_MONTH_MAP = {
+        2005: [2],
     }
     # ======================
 

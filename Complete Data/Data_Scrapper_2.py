@@ -126,9 +126,37 @@ def main(
 if __name__ == "__main__":
     main(
         underlying="GF",
-        start_year=1999,
+        start_year=2001,
         end_year=2025,
         months_to_check=None,
-        #months_to_check=[1, 3, 5],
     )
+    main(
+        underlying="ZL",
+        start_year=2001,
+        end_year=2025,
+        months_to_check=None,
+    )
+    main(
+        underlying="ZM",
+        start_year=2001,
+        end_year=2025,
+        months_to_check=None,
+    )
+    main(
+        underlying="ZO",
+        start_year=2001,
+        end_year=2025,
+        months_to_check=None,
+    )
+    main(
+        underlying="ZR",
+        start_year=2001,
+        end_year=2025,
+        months_to_check=None,
+    )
+ #   "GF": "Feeder Cattle (Globex)",
+    #    "ZL": "Soybean Oil (Globex)",
+    #    "ZM": "Soybean Meal (Globex)",
+    #   "ZO": "Oats (Globex)",
+#   "ZR": "Rough Rice (Globex)",
 
