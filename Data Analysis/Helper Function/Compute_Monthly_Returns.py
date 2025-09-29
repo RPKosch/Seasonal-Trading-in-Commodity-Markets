@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 # -----------------------------------------------------------------------------
 # === CONFIGURATION ===
 # -----------------------------------------------------------------------------
-USE_LOG_RETURNS   = False
+USE_LOG_RETURNS   = True
 VOLUME_THRESHOLD  = 1000  # min in-month volume required for a contract to be usable
 
 LOST_TICKERS = ["PA", "PL"]
@@ -20,7 +20,7 @@ TICKERS         = ["CC", "CF", "CO", "CP", "CT", "ZW", "GD", "HE", "HO",
 
 TICKERS         = ["CC","CF","CO","CP","GD","LE","NG","ZS","SU","ZC","GF","ZL","ZM","ZO","ZR"]
 
-TICKERS         = ["GF", "ZL", "ZM", "ZO", "ZR"]
+TICKERS         = ["ZL", "ZM"]
 
 #Drop: HO (dup. with crude), SV (dup. with gold), HE (livestock overlap), CT (free a softs slot), ZW (to offset heavier soy complex)
 
