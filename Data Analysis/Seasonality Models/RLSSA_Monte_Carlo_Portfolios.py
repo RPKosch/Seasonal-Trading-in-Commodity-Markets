@@ -1,23 +1,22 @@
-# -*- coding: utf-8 -*-
-# Monte Carlo for RLSSA-based Top-1 (Baseline vs GPS), monthly compounding.
-# - RLSSA fit on LOG monthly returns (ranking)
-# - GPS metrics & compounding use SIMPLE monthly returns
-# - Optional EWMA scaling of RLSSA scores (score / sigma)
-#
-# Structure mirrors your DVR MC script: same helpers, reporting, IO layout,
-# just swapping DVR stats for RLSSA forecasts.
-
-import time
+import io, sys, time
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm  # kept for parity/extensibility
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal
 from collections import defaultdict
 from dataclasses import dataclass
 from scipy import stats as st
+from contextlib import redirect_stdout
+
+# =============================== #
+# 0) GLOBAL SWITCHES / SIGNIFICANCE
+# =============================== #
+# Two-sided significance control implemented as BOTH one-sided tests at α/2
+SIGNIF_TWO_SIDED_ALPHA = 0.05
+PER_SIDE_ALPHA         = SIGNIF_TWO_SIDED_ALPHA / 2.0  # 0.025
 
 # =============================== #
 # 1) PARAMETERS & WINDOWS
@@ -43,19 +42,26 @@ MIN_OBS_FOR_VOL         = 12
 GPS_ROLLING_ENABLED     = True                   # True=rolling 5y monthly re-calibration; False=fixed pre-apply
 GPS_CALIB_YEARS         = SIM_YEARS
 
+# === GPS score metric selection (case-insensitive; aliases allowed) =========
+# Choose any subset of:
+#   "Seasonality", "Sharpe"/"Sharp", "Treynor", "Calmar",
+#   "Information", "Mer_ann", "One_minus_mdd", "Cum_ret", "Sortino"
+# Default replicates your current behavior (Seasonality, Sharpe, Treynor, MDD inverted).
+GPS_SCORE_COMPONENTS = ["Seasonality", "Sharpe", "Cum_ret", "Information"]
+
 # Contract/IO (only monthly files used here)
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 5
+MC_RUNS                 = 10
 LAMBDA_EWMA             = 0.94                   # for EWMA-projected sigma used in noise injection
 BACKCAST_N              = 12
 RNG_SEED                = 42
-SAVE_SERIES             = True                   # save Top-1 monthly series per run
+SAVE_SERIES             = False                   # save Top-1 monthly series per run
 OUT_DIR_MC              = Path().resolve() / "Outputs_MC" / f"RLSSA_MC_{'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'}"
 
 # NEW switches
-SAVE_TICKER_CHOICES_CSV = True                   # write a single CSV with chosen tickers per run & month
+SAVE_TICKER_CHOICES_CSV = True                   # write Top-5 selection-share tables per direction
 ZERO_NOISE              = False                  # if True, set z_t = 0 (no randomness)
 
 # =============================== #
@@ -74,6 +80,14 @@ print(f"Apply   : {FINAL_SIM_START.date()} -> {FINAL_SIM_END.date()}")
 # =============================== #
 # 3) HELPERS
 # =============================== #
+def rule(ch="─", n=96) -> str:
+    return ch * n
+
+def section(title: str, ch="═", n=96):
+    print("\n" + rule(ch, n))
+    print(title)
+    print(rule(ch, n) + "\n")
+
 def load_returns(root_dir: Path) -> dict[str, pd.Series]:
     """
     Load *_Monthly_Revenues.csv as Series(date->return). Assumes columns year, month, return.
@@ -109,30 +123,103 @@ def nav_from_returns_on_grid(returns: pd.Series,
         out_idx.append(dt)
     return pd.Series(out_vals, index=out_idx, name="nav")
 
+# ---- Benchmark & relative-performance helpers (ported & aligned with DVR)
+def build_equal_weight_benchmark(simple_rets_dict: dict[str, pd.Series],
+                                 start_dt: pd.Timestamp,
+                                 end_dt: pd.Timestamp) -> pd.Series:
+    idx = pd.date_range(start_dt, end_dt, freq='MS')
+    df = pd.DataFrame({t: s.reindex(idx) for t, s in simple_rets_dict.items()})
+    return df.mean(axis=1, skipna=True).rename("benchmark")
+
+def direction_consistent_benchmark(bench: pd.Series, direction: str, entry_cost: float) -> pd.Series:
+    """
+    Transform a gross, long benchmark to be direction-consistent and net-of-cost:
+      - if direction == 'short': r -> 1/(1+r) - 1
+      - then apply netting:      r -> (1-c)*(1+r) - 1
+    """
+    b = bench.astype(float)
+    if direction == 'short':
+        b = (1.0 / (1.0 + b)) - 1.0
+    b = (1.0 - entry_cost) * (1.0 + b) - 1.0
+    return b.rename(f"{bench.name or 'benchmark'}_{direction}_net")
+
+def compute_beta(port: pd.Series, bench: pd.Series) -> float:
+    x = bench.dropna()
+    y = port.dropna()
+    z = pd.concat([x, y], axis=1, join="inner")
+    if z.shape[0] < 3:
+        return np.nan
+    b = z.iloc[:, 1]
+    m = z.iloc[:, 0]
+    var_m = np.var(m.values, ddof=1)
+    if var_m == 0 or not np.isfinite(var_m):
+        return np.nan
+    cov = np.cov(b.values, m.values, ddof=1)[0, 1]
+    return cov / var_m
+
+def treynor_ratio_series(port: pd.Series, bench: pd.Series) -> float:
+    """
+    Full-period Treynor (annualized) from monthly returns:
+        Treynor_ann = 12 * mean_m(port) / beta(port, bench)
+    """
+    beta = compute_beta(port, bench)
+    if not np.isfinite(beta) or beta == 0:
+        return np.nan
+    mu = float(np.nanmean(port.values)) if len(port) else np.nan
+    return 12.0 * (mu / beta)
+
+def information_ratio_series(port: pd.Series, bench: pd.Series) -> float:
+    """
+    Full-period Information Ratio (annualized) from monthly returns:
+        IR_ann = (mean_m(active) / std_m(active)) * sqrt(12)
+    """
+    a = pd.concat([port, bench], axis=1, join="inner")
+    if a.shape[0] < 3:
+        return np.nan
+    active = a.iloc[:, 0] - a.iloc[:, 1]
+    std = float(np.nanstd(active.values, ddof=1))
+    if std == 0 or not np.isfinite(std):
+        return np.nan
+    return float(np.nanmean(active.values)) / std * np.sqrt(12)
+
+def mean_excess_return_series(port: pd.Series, bench: pd.Series) -> float:
+    """
+    Mean monthly excess return vs. benchmark (NET; not annualized).
+    """
+    a = pd.concat([port, bench], axis=1, join="inner")
+    if a.shape[0] == 0:
+        return np.nan
+    active = a.iloc[:, 0] - a.iloc[:, 1]
+    return float(np.nanmean(active.values))
+
 def sharpe_ratio(returns: list[Decimal] | np.ndarray) -> float:
-    arr = np.array([float(r) for r in returns])
+    arr = np.array([float(r) for r in returns], dtype=float)
     if arr.size == 0: return np.nan
     std = arr.std(ddof=1)
-    if std == 0: return np.nan
+    if std == 0 or not np.isfinite(std): return np.nan
     return arr.mean() / std * np.sqrt(12)
 
 def sortino_ratio(returns: list[Decimal] | np.ndarray) -> float:
-    arr = np.array([float(r) for r in returns])
+    arr = np.array([float(r) for r in returns], dtype=float)
     if arr.size == 0: return np.nan
     neg = arr[arr < 0]
     if neg.size == 0: return np.nan
-    return arr.mean() / neg.std(ddof=1) * np.sqrt(12)
+    std_neg = neg.std(ddof=1)
+    if std_neg == 0 or not np.isfinite(std_neg): return np.nan
+    return arr.mean() / std_neg * np.sqrt(12)
 
 def calmar_ratio(returns: list[Decimal] | np.ndarray) -> float:
-    arr = np.array([float(r) for r in returns])
+    arr = np.array([float(r) for r in returns], dtype=float)
     if arr.size == 0: return np.nan
     cum = np.cumprod(1 + arr)
+    if cum.size == 0: return np.nan
+    years = len(arr) / 12
+    if years <= 0: return np.nan
+    cagr = cum[-1] ** (1 / years) - 1
     peak = np.maximum.accumulate(cum)
     dd = cum / peak - 1
     mdd = abs(dd.min()) if len(dd) else np.nan
-    years = len(arr) / 12
-    if not np.isfinite(mdd) or mdd == 0 or years == 0: return np.nan
-    cagr = cum[-1] ** (1 / years) - 1
+    if not np.isfinite(mdd) or mdd == 0: return np.nan
     return cagr / mdd
 
 def minmax_01(arr_like) -> np.ndarray:
@@ -362,7 +449,7 @@ def build_rlssa_rankings_from_log_rets(log_rets_sim: dict[str, pd.Series],
     return long_rankings, short_rankings, season_score_by_month_sim
 
 # =============================== #
-# 8) TOP-1 MONTHLY SERIES (BASELINE & GPS)
+# 8) TOP-1 & WEIGHTED MONTHLY SERIES
 # =============================== #
 def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
                          simple_rets_dict: dict[str, pd.Series],
@@ -399,20 +486,56 @@ def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
         return ret_ser, tkr_ser
     return ret_ser
 
+def equal_weight_portfolio_series(simple_rets_dict: dict[str, pd.Series],
+                                  *,
+                                  direction: str,
+                                  start_dt: pd.Timestamp,
+                                  end_dt: pd.Timestamp,
+                                  entry_cost: float) -> pd.Series:
+    """
+    Equal-weight across all tickers each month (skip-NA mean). Apply short transform if direction=='short'.
+    Apply entry cost monthly.
+    """
+    idx = pd.date_range(start_dt, end_dt, freq='MS')
+    df = pd.DataFrame({t: s.reindex(idx) for t, s in simple_rets_dict.items()})
+    if direction == 'short':
+        df = (1.0 / (1.0 + df)) - 1.0
+    ew = df.mean(axis=1, skipna=True)
+    ew_wc = (1.0 - entry_cost) * (1.0 + ew) - 1.0
+    return ew_wc.rename("equal_weight")
+
+# =============================== #
+# 9) GPS MAPPING (RLSSA) — includes Treynor & MaxDD like DVR
+# =============================== #
+def max_drawdown_from_monthly(returns: pd.Series) -> float:
+    r = pd.Series(returns, dtype=float).dropna()
+    if r.empty:
+        return np.nan
+    cum = (1.0 + r.values).cumprod()
+    peak = np.maximum.accumulate(cum)
+    dd = cum / peak - 1.0
+    return float(dd.min())  # signed (≤0)
+
 def compute_gps_mapping_for_month_rlssa(dt: pd.Timestamp,
                                         rankings: dict[pd.Timestamp, list[str]],
                                         simple_rets_dict: dict[str, pd.Series],
                                         season_score_by_month: dict[pd.Timestamp, dict[str, float]],
+                                        bench_full: pd.Series,
                                         *,
                                         direction: str,
                                         calib_years: int,
-                                        rolling: bool) -> dict[int, int]:
+                                        rolling: bool,
+                                        entry_cost: float) -> dict[int, int]:
     """
-    Build GPS new->prev rank mapping for month dt (RLSSA version using saved RLSSA scores).
-    Rolling: use [dt-5y, dt-1m]; Fixed: first 5y before FINAL_SIM_START.
+    GPS new->prev rank mapping for month dt using:
+      • Seasonality (RLSSA) = the single next-month forecast score at dt (built from prior 10y), direction-aware
+      • Sharpe, Treynor, MaxDD computed on NET returns over calibration window (no look-ahead):
+          rolling=True  -> [dt - calib_years .. dt - 1m]
+          rolling=False -> [FINAL_SIM_START - calib_years .. FINAL_SIM_START - 1m]
     """
+    # --- calibration window (no future info)
     if rolling:
-        dt_minus = dt - relativedelta(years=calib_years)
+        dt_minus  = dt - relativedelta(years=calib_years)
         win_start = pd.Timestamp(datetime(dt_minus.year, dt_minus.month, 1))
         win_end   = dt - pd.offsets.MonthEnd(1)
     else:
@@ -423,15 +546,25 @@ def compute_gps_mapping_for_month_rlssa(dt: pd.Timestamp,
     if win_end < win_start:
         return {1: 1}
 
-    rets_nc = defaultdict(list)
-    season_by_prev_rank = defaultdict(list)
-    num_t = len(rankings.get(dt, []))
+    # Benchmark over the window (gross long → direction-consistent NET)
+    bench_win_raw = bench_full.loc[(bench_full.index >= win_start) & (bench_full.index <= win_end)]
+    if bench_win_raw.empty:
+        return {1: 1}
+    bench_win = direction_consistent_benchmark(bench_win_raw, direction, entry_cost)
+
+    # --- gather returns per previous rank over the window
+    order_today = rankings.get(dt, [])
+    num_t = len(order_today)
+    if num_t == 0:
+        return {1: 1}
+
+    rets_by_pr: dict[int, list[float]] = defaultdict(list)
+    dates_by_pr: dict[int, list[pd.Timestamp]] = defaultdict(list)
 
     for d in pd.date_range(win_start, win_end, freq='MS'):
         order_d = rankings.get(d)
         if not order_d:
             continue
-        s_map = season_score_by_month.get(d, {})
         for pr, tkr in enumerate(order_d, start=1):
             s = simple_rets_dict.get(tkr)
             if s is None or d not in s.index:
@@ -439,39 +572,70 @@ def compute_gps_mapping_for_month_rlssa(dt: pd.Timestamp,
             r = float(s.loc[d])
             if direction == 'short':
                 r = (1.0 / (1.0 + r)) - 1.0
-            rets_nc[pr].append(Decimal(str(r)))
+            r_net = (1.0 - entry_cost) * (1.0 + r) - 1.0
+            rets_by_pr[pr].append(r_net)
+            dates_by_pr[pr].append(d)
 
-            sc = s_map.get(tkr, np.nan)
-            if np.isfinite(sc):
-                sc = -float(sc) if direction == 'short' else float(sc)
-            season_by_prev_rank[pr].append(sc if np.isfinite(sc) else np.nan)
+    # --- compute metrics per prev-rank
+    # RLSSA seasonality score AT dt (point-in-time; no averaging)
+    s_map_dt = season_score_by_month.get(dt, {})
 
     rows = []
     for pr in range(1, num_t + 1):
-        rows.append({'prev_rank': pr,
-                     'season':  float(np.nanmean(np.asarray(season_by_prev_rank.get(pr, []), dtype=float)))
-                                   if np.isfinite(np.asarray(season_by_prev_rank.get(pr, []), dtype=float)).any() else np.nan,
-                     'sharpe':  sharpe_ratio(rets_nc.get(pr, [])),
-                     'sortino': sortino_ratio(rets_nc.get(pr, [])),
-                     'calmar':  calmar_ratio(rets_nc.get(pr, []))})
+        # ticker at prev-rank pr TODAY (dt)
+        tkr_at_dt = order_today[pr - 1] if pr - 1 < len(order_today) else None
+
+        # RLSSA seasonality score at dt (direction-aware)
+        sc = np.nan
+        if tkr_at_dt is not None:
+            sc = s_map_dt.get(tkr_at_dt, np.nan)
+            if np.isfinite(sc) and direction == 'short':
+                sc = -float(sc)
+
+        # ratios on window
+        if pr in rets_by_pr:
+            port = pd.Series(rets_by_pr[pr], index=pd.DatetimeIndex(dates_by_pr[pr]))
+            port = port.loc[(port.index >= win_start) & (port.index <= win_end)].sort_index()
+            sr     = sharpe_ratio(list(port.values))
+            trey   = treynor_ratio_series(port, bench_win)
+            mddmag = abs(max_drawdown_from_monthly(port))
+        else:
+            sr, trey, mddmag = (np.nan, np.nan, np.nan)
+
+        rows.append({
+            'prev_rank': pr,
+            'seasonality_score': sc,
+            'sharpe': sr,
+            'treynor': trey,
+            'mdd_mag': mddmag
+        })
+
     mdf = pd.DataFrame(rows).set_index('prev_rank').sort_index()
     if mdf.empty:
         return {1: 1}
-    for c in ['season','sharpe','sortino','calmar']:
-        mdf[f'{c}_01'] = minmax_01(mdf[c].values)
-    norm_cols = [f'{c}_01' for c in ['season','sharpe','sortino','calmar']]
-    mdf['score'] = [gps_harmonic_01(mdf.loc[i, norm_cols].values) for i in mdf.index]
-    mdf['new_rank'] = mdf['score'].rank(ascending=False, method='first')
 
+    # --- normalize to [0,1] and combine (higher is better); invert MDD for scoring
+    mdf['seasonality_score_01'] = minmax_01(mdf['seasonality_score'].values)
+    mdf['sharpe_01']            = minmax_01(mdf['sharpe'].values)
+    mdf['treynor_01']           = minmax_01(mdf['treynor'].values)
+    mdf['mdd_inv_01']           = 1.0 - minmax_01(mdf['mdd_mag'].values)
+
+    norm_cols = ['seasonality_score_01', 'sharpe_01', 'treynor_01', 'mdd_inv_01']
+    mdf['score'] = [gps_harmonic_01(mdf.loc[i, norm_cols].values) for i in mdf.index]
+
+    # new_rank by descending score → invert to mapping new->prev
+    mdf['new_rank'] = mdf['score'].rank(ascending=False, method='first')
     inv = {}
     for prev_rank, row in mdf.iterrows():
-        nr = int(row['new_rank']); pr = int(prev_rank)
-        if nr not in inv: inv[nr] = pr
+        nr = int(row['new_rank'])
+        if nr not in inv:
+            inv[nr] = int(prev_rank)
     return inv
 
 def monthly_top1_returns_gps_rlssa(rankings: dict[pd.Timestamp, list[str]],
                                    simple_rets_dict: dict[str, pd.Series],
                                    season_score_by_month: dict[pd.Timestamp, dict[str, float]],
+                                   bench_full: pd.Series,
                                    *,
                                    direction: str,
                                    start_dt: pd.Timestamp,
@@ -481,7 +645,7 @@ def monthly_top1_returns_gps_rlssa(rankings: dict[pd.Timestamp, list[str]],
                                    entry_cost: float,
                                    return_tickers: bool = False) -> pd.Series | tuple[pd.Series, pd.Series]:
     """
-    TOP-1 ONLY: GPS maps new_rank=1 to a prev_rank, takes that ticker's simple return.
+    TOP-1 ONLY: GPS maps new_rank=1 to a prev_rank, takes that ticker's NET simple return.
     If return_tickers=True, also returns a Series of chosen tickers (always recorded),
     while returns are NaN when the chosen ticker has no return for that month.
     """
@@ -491,8 +655,9 @@ def monthly_top1_returns_gps_rlssa(rankings: dict[pd.Timestamp, list[str]],
         if not order_today:
             continue
         mapping = compute_gps_mapping_for_month_rlssa(
-            dt, rankings, simple_rets_dict, season_score_by_month,
-            direction=direction, calib_years=calib_years, rolling=rolling
+            dt, rankings, simple_rets_dict, season_score_by_month, bench_full,
+            direction=direction, calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
+            entry_cost=ENTRY_COST
         )
         prev_rank = mapping.get(1, 1)
         if prev_rank < 1 or prev_rank > len(order_today):
@@ -514,8 +679,50 @@ def monthly_top1_returns_gps_rlssa(rankings: dict[pd.Timestamp, list[str]],
         return ret_ser, tkr_ser
     return ret_ser
 
+# ---------- NEW: Top-5 monthly selection tables (per direction) ---------- #
+def build_monthly_top5_table(df_choices: pd.DataFrame, direction: str, n_runs: int, top_k: int = 5) -> pd.DataFrame:
+    """
+    For each monthly date in the apply window and a given direction,
+    compute the top-k tickers by selection share for Baseline and GPS.
+    Each cell formatted like "[TICKER | 55.7%]" (pct of total simulations).
+    Returns a DataFrame with columns:
+        Date | B1..B5 | G1..G5
+    """
+    sub = df_choices[df_choices['direction'] == direction].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=['Date'] + [f'B{i}' for i in range(1, top_k+1)] + [f'G{i}' for i in range(1, top_k+1)])
+
+    sub['date'] = pd.to_datetime(sub['date'])
+    dates = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
+
+    rows = []
+    for dt in dates:
+        dsel = sub[sub['date'] == dt]
+        # counts
+        base_counts = dsel['baseline_ticker'].value_counts()  # NaNs excluded by default
+        gps_counts  = dsel['gps_ticker'].value_counts()
+
+        def fmt_top(series):
+            series = series.head(top_k)
+            labels = []
+            for tkr, cnt in series.items():
+                pct = 100.0 * float(cnt) / float(n_runs)
+                labels.append(f"[{tkr} | {pct:.1f}%]")
+            while len(labels) < top_k:
+                labels.append("")
+            return labels
+
+        B = fmt_top(base_counts)
+        G = fmt_top(gps_counts)
+        rows.append({
+            'Date': dt.date().isoformat(),
+            **{f'B{i+1}': B[i] for i in range(top_k)},
+            **{f'G{i+1}': G[i] for i in range(top_k)},
+        })
+    return pd.DataFrame(rows)
+
 # =============================== #
-# 9) METRICS & WINDOWS
+# 10) METRICS & WINDOWS
 # =============================== #
 @dataclass
 class Perf:
@@ -533,25 +740,23 @@ def cagr_from_monthly(returns: pd.Series) -> float:
     years = len(returns) / 12.0
     return factor ** (1/years) - 1.0 if years > 0 else np.nan
 
-def max_drawdown_from_monthly(returns: pd.Series) -> float:
-    if returns.empty: return np.nan
-    cum = np.cumprod(1.0 + returns.values)
-    peak = np.maximum.accumulate(cum)
-    dd = cum / peak - 1.0
-    return float(np.min(dd))  # negative
-
 def perf_from_monthly(returns: pd.Series) -> Perf:
     arr = returns.astype(float).values
     if arr.size == 0:
         return Perf(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-    sr  = sharpe_ratio(list(arr))
-    sor = sortino_ratio(list(arr))
-    cal = calmar_ratio(list(arr))
-    cum = float(np.prod(1.0 + arr) - 1.0)
-    cg  = cagr_from_monthly(returns)
-    mdd = max_drawdown_from_monthly(returns)
-    sd  = float(np.std(arr, ddof=1)) if arr.size >= 2 else np.nan
-    return Perf(cum, cg, sr, sor, cal, mdd, sd)
+    sr  = sharpe_ratio(arr)       # annualized, full-period
+    sor = sortino_ratio(arr)      # annualized, full-period
+    cal = calmar_ratio(arr)       # full-period
+    cum = float(np.prod(1.0 + arr) - 1.0)  # full-period cumulative return
+    years = len(arr) / 12.0
+    cagr = (np.prod(1.0 + arr) ** (1/years) - 1.0) if years > 0 else np.nan
+    # MDD negative; store as negative; report abs() where displayed
+    cum_curve = np.cumprod(1.0 + arr)
+    peak = np.maximum.accumulate(cum_curve)
+    dd = cum_curve / peak - 1.0
+    mdd = float(np.min(dd)) if dd.size else np.nan
+    sd  = float(np.std(arr, ddof=1)) if arr.size >= 2 else np.nan  # monthly within-period stdev
+    return Perf(cum, cagr, sr, sor, cal, mdd, sd)
 
 def three_fixed_windows() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Exactly 3x3y windows starting 2016-01 given globals."""
@@ -564,62 +769,140 @@ def three_fixed_windows() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     return wins
 
 # =============================== #
-# 10) MONTE CARLO: BOTH DIRECTIONS (efficient)
+# 11) SIGNIFICANCE HELPERS (paired, one-sided both directions at α/2)
+# =============================== #
+def paired_one_sided_both(left: np.ndarray, right: np.ndarray):
+    """
+    Returns (t_right>left, p_right>left, t_right<left, p_right<left, n_valid)
+    using paired one-sided t-tests on matched pairs.
+    """
+    mask = np.isfinite(left) & np.isfinite(right)
+    n = int(mask.sum())
+    if n < 3:
+        return None, None, None, None, n
+    t_g, p_g = st.ttest_rel(right[mask], left[mask], alternative='greater')
+    t_l, p_l = st.ttest_rel(right[mask], left[mask], alternative='less')
+    return float(t_g), float(p_g), float(t_l), float(p_l), n
+
+def print_sig_line_generic(metric_name: str,
+                           left_label: str, right_label: str,
+                           t_g, p_g, t_l, p_l, n: int,
+                           better_note: str):
+    """
+    Report significance with per-side alpha = PER_SIDE_ALPHA (overall two-sided 5%).
+    Tests are RIGHT vs LEFT.
+    """
+    if n < 3:
+        print(f"    {right_label} vs {left_label} — {metric_name:<9}: insufficient valid pairs.")
+        return
+    better = f"{right_label} better at 5% two-sided" if (p_g is not None and p_g < PER_SIDE_ALPHA) else "no better effect at 5%"
+    worse  = f"{right_label} worse at 5% two-sided"  if (p_l is not None and p_l < PER_SIDE_ALPHA) else "no worse effect at 5%"
+    print(f"    {right_label} vs {left_label} — {metric_name:<9}: n={n:4d} | "
+          f"better ({better_note}; α_one-sided={PER_SIDE_ALPHA:.3f}): t={t_g:.3f}, p={p_g:.4f} -> {better} | "
+          f"worse: t={t_l:.3f}, p={p_l:.4f} -> {worse}")
+
+def paired_one_sided_both_from_df(df_dir: pd.DataFrame, strat_left: str, strat_right: str, col: str):
+    """
+    Utility for Treynor (or any column in df_metrics) comparisons: merges by run for two strategies
+    and returns paired one-sided t-test results for right vs left.
+    """
+    L = df_dir[df_dir['strategy'] == strat_left][['run', col]].rename(columns={col: 'L'})
+    R = df_dir[df_dir['strategy'] == strat_right][['run', col]].rename(columns={col: 'R'})
+    merged = pd.merge(L, R, on='run', how='inner').dropna()
+    if merged.empty:
+        return None, None, None, None, 0
+    return paired_one_sided_both(merged['L'].values.astype(float), merged['R'].values.astype(float))
+
+# =============================== #
+# 12) MONTE CARLO: BOTH DIRECTIONS (efficient)
 # =============================== #
 def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
     OUT_DIR_MC.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(RNG_SEED)
-    t0 = time.time()
-    print(f"Starting Monte Carlo (BOTH directions): runs={n_runs}, lambda={lam}, zero_noise={zero_noise}")
-    print(f"RLSSA ranking: L={SSA_WINDOW}, q={SSA_COMPS}, scale={'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'}")
 
-    # Precompute sigma projections once (used only if zero_noise=False)
-    sigma_proj = None if zero_noise else precompute_sigma_proj_for_all(log_rets, lam=lam)
+    # ---- Tee prints to console AND buffer; write buffer to file at end
+    buf = io.StringIO()
 
-    # Static grids
-    month_grid = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
-    splits = three_fixed_windows()
+    class Tee(io.TextIOBase):
+        def __init__(self, *streams): self.streams = streams
+        def write(self, s):
+            for st_ in self.streams: st_.write(s)
+            return len(s)
+        def flush(self):
+            for st_ in self.streams:
+                try: st_.flush()
+                except Exception: pass
 
-    # Aggregators per direction
-    dirs = ('long', 'short')
-    full_metrics = {d: {'baseline': [], 'gps': []} for d in dirs}
-    sub_metrics = {d: {'baseline': defaultdict(list), 'gps': defaultdict(list)} for d in dirs}
-    pos_counts = {d: {'baseline': 0, 'gps': 0} for d in dirs}
-    neg_counts = {d: {'baseline': 0, 'gps': 0} for d in dirs}
-    choice_records = []  # unified CSV with 'direction' column
+    tee = Tee(sys.__stdout__, buf)
 
-    # If zero_noise, the simulated logs are just base logs; compute simple once
-    simple_base_if_zero = log_to_simple_dict(log_rets) if zero_noise else None
+    # Unified metrics table + selection records
+    metrics_rows: list[dict] = []
+    choice_records = []
 
-    for run in range(1, n_runs + 1):
-        # 1) simulate (or reuse base) ONCE per run
-        log_sim = simulate_log_returns_with_sigma(log_rets, sigma_proj, lam=lam, rng=rng, no_noise=zero_noise)
-        simple_sim = simple_base_if_zero if simple_base_if_zero is not None else log_to_simple_dict(log_sim)
+    with redirect_stdout(tee):
+        rng = np.random.default_rng(RNG_SEED)
+        t0 = time.time()
 
-        # 2) build RLSSA rankings/season scores ONCE per run
-        L_rank, S_rank, season_by_month = build_rlssa_rankings_from_log_rets(log_sim, simple_sim, LOOKBACK_YEARS)
+        section(f"Starting Monte Carlo — RLSSA (BOTH directions) | runs={n_runs:,} | λ={lam} | zero_noise={zero_noise}")
+        print(f"Ranking: RLSSA(L={SSA_WINDOW}, q={SSA_COMPS}, scale={'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'})")
+        print(f"Windows: Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
+              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()}")
+        print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST:.4f}\n")
 
-        # 3) iterate BOTH directions using shared computations
-        for direction, rank_use in (('long', L_rank), ('short', S_rank)):
-            # Baseline + GPS top-1 series
-            top1_baseline, tkr_baseline = monthly_top1_returns(
-                rank_use, simple_sim, direction=direction,
-                start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-                entry_cost=ENTRY_COST, return_tickers=True
-            )
-            top1_gps, tkr_gps = monthly_top1_returns_gps_rlssa(
-                rank_use, simple_sim, season_by_month, direction=direction,
-                start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-                calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
-                entry_cost=ENTRY_COST, return_tickers=True
-            )
+        # Precompute sigma projections once (used only if zero_noise=False)
+        sigma_proj = None if zero_noise else precompute_sigma_proj_for_all(log_rets, lam=lam)
 
-            # NAV series (for CSV context)
-            nav_baseline = nav_from_returns_on_grid(top1_baseline, START_VALUE, month_grid)
-            nav_gps      = nav_from_returns_on_grid(top1_gps,      START_VALUE, month_grid)
+        # Static grids
+        month_grid = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
+        splits = three_fixed_windows()
 
-            # Save choices in unified long-form
-            if SAVE_TICKER_CHOICES_CSV:
+        # Aggregators per direction (include 'weighted' = equal-weight across universe)
+        dirs = ('long', 'short')
+        full_metrics = {d: {'baseline': [], 'gps': [], 'weighted': []} for d in dirs}
+        sub_metrics  = {d: {'baseline': defaultdict(list), 'gps': defaultdict(list), 'weighted': defaultdict(list)} for d in dirs}
+        sub_treynor  = {d: {'baseline': defaultdict(list), 'gps': defaultdict(list), 'weighted': defaultdict(list)} for d in dirs}
+        pos_counts   = {d: {'baseline': 0, 'gps': 0, 'weighted': 0} for d in dirs}
+        neg_counts   = {d: {'baseline': 0, 'gps': 0, 'weighted': 0} for d in dirs}
+
+        # MAIN LOOP
+        for run in range(1, n_runs + 1):
+            # 1) simulate log returns (or reuse base logs) and convert to simple
+            log_sim = simulate_log_returns_with_sigma(log_rets, sigma_proj, lam=lam, rng=rng, no_noise=zero_noise)
+            simple_sim = log_to_simple_dict(log_sim) if not zero_noise else log_to_simple_dict(log_rets)
+
+            # 2) build RLSSA rankings & per-month seasonality scores
+            L_rank, S_rank, season_by_month = build_rlssa_rankings_from_log_rets(log_sim, simple_sim, LOOKBACK_YEARS)
+
+            # 3) equal-weight benchmarks (gross long) for test+apply (full) and apply (window)
+            bench_full  = build_equal_weight_benchmark(simple_sim, TEST_SIM_START,  FINAL_END)
+            bench_apply = build_equal_weight_benchmark(simple_sim, FINAL_SIM_START, FINAL_SIM_END)
+
+            # 4) iterate BOTH directions
+            for direction, rank_use in (('long', L_rank), ('short', S_rank)):
+                # Direction-consistent, NET benchmark for the APPLY window
+                bench_apply_dc = direction_consistent_benchmark(bench_apply, direction, ENTRY_COST)
+
+                # Baseline + GPS Top-1 (NET) and equal-weight (NET)
+                top1_baseline, tkr_baseline = monthly_top1_returns(
+                    rank_use, simple_sim, direction=direction,
+                    start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
+                    entry_cost=ENTRY_COST, return_tickers=True
+                )
+                top1_gps, tkr_gps = monthly_top1_returns_gps_rlssa(
+                    rank_use, simple_sim, season_by_month, bench_full,
+                    direction=direction,
+                    start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
+                    calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
+                    entry_cost=ENTRY_COST, return_tickers=True
+                )
+                eq_weight_series = equal_weight_portfolio_series(
+                    simple_sim, direction=direction,
+                    start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
+                    entry_cost=ENTRY_COST
+                )
+
+                # NAV for context + record Top-1 choices (all months)
+                nav_baseline = nav_from_returns_on_grid(top1_baseline, START_VALUE, month_grid)
+                nav_gps      = nav_from_returns_on_grid(top1_gps,      START_VALUE, month_grid)
                 for dt in month_grid:
                     choice_records.append({
                         'direction': direction,
@@ -631,146 +914,252 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                         'gps_value': float(nav_gps.get(dt, np.nan)),
                     })
 
-            # Optional per-run series (direction-tagged folders)
-            if save_series:
-                ddir = OUT_DIR_MC / f"{direction}_run_{run:03d}"
-                ddir.mkdir(parents=True, exist_ok=True)
-                top1_baseline.to_csv(ddir / "top1_baseline_monthly.csv")
-                top1_gps.to_csv(ddir / "top1_gps_monthly.csv")
+                # Optional per-run series (direction-tagged folders)
+                if save_series:
+                    ddir = OUT_DIR_MC / f"{direction}_run_{run:03d}"
+                    ddir.mkdir(parents=True, exist_ok=True)
+                    top1_baseline.to_csv(ddir / "top1_baseline_monthly.csv")
+                    top1_gps.to_csv(ddir / "top1_gps_monthly.csv")
+                    eq_weight_series.to_csv(ddir / "weighted_equal_monthly.csv")
 
-            # Full-period metrics
-            pb, pg = perf_from_monthly(top1_baseline), perf_from_monthly(top1_gps)
-            full_metrics[direction]['baseline'].append(pb)
-            full_metrics[direction]['gps'].append(pg)
-            pos_counts[direction]['baseline'] += int(pb.cum_ret > 0)
-            neg_counts[direction]['baseline'] += int(pb.cum_ret <= 0)
-            pos_counts[direction]['gps']      += int(pg.cum_ret > 0)
-            neg_counts[direction]['gps']      += int(pg.cum_ret <= 0)
+                # Full-period metrics (apply window) on NET returns vs direction-consistent NET bench
+                pb, pg, pw = perf_from_monthly(top1_baseline), perf_from_monthly(top1_gps), perf_from_monthly(eq_weight_series)
+                full_metrics[direction]['baseline'].append(pb)
+                full_metrics[direction]['gps'].append(pg)
+                full_metrics[direction]['weighted'].append(pw)
+                pos_counts[direction]['baseline'] += int(pb.cum_ret > 0)
+                neg_counts[direction]['baseline'] += int(pb.cum_ret <= 0)
+                pos_counts[direction]['gps']      += int(pg.cum_ret > 0)
+                neg_counts[direction]['gps']      += int(pg.cum_ret <= 0)
+                pos_counts[direction]['weighted'] += int(pw.cum_ret > 0)
+                neg_counts[direction]['weighted'] += int(pw.cum_ret <= 0)
 
-            # Subperiod metrics
+                # Per-run metrics row (use direction-consistent NET bench for Treynor/IR/MER)
+                metrics_rows.append({
+                    'run': run, 'direction': direction, 'strategy': 'baseline',
+                    'sharpe': pb.sharpe, 'sortino': pb.sortino,
+                    'treynor': treynor_ratio_series(top1_baseline, bench_apply_dc),
+                    'information': information_ratio_series(top1_baseline, bench_apply_dc),
+                    'calmar': pb.calmar, 'cum_ret': pb.cum_ret,
+                    'mdd': abs(pb.mdd) if np.isfinite(pb.mdd) else np.nan,
+                    'mer': mean_excess_return_series(top1_baseline, bench_apply_dc),
+                })
+                metrics_rows.append({
+                    'run': run, 'direction': direction, 'strategy': 'gps',
+                    'sharpe': pg.sharpe, 'sortino': pg.sortino,
+                    'treynor': treynor_ratio_series(top1_gps, bench_apply_dc),
+                    'information': information_ratio_series(top1_gps, bench_apply_dc),
+                    'calmar': pg.calmar, 'cum_ret': pg.cum_ret,
+                    'mdd': abs(pg.mdd) if np.isfinite(pg.mdd) else np.nan,
+                    'mer': mean_excess_return_series(top1_gps, bench_apply_dc),
+                })
+                metrics_rows.append({
+                    'run': run, 'direction': direction, 'strategy': 'weighted',
+                    'sharpe': pw.sharpe, 'sortino': pw.sortino,
+                    'treynor': treynor_ratio_series(eq_weight_series, bench_apply_dc),
+                    'information': information_ratio_series(eq_weight_series, bench_apply_dc),
+                    'calmar': pw.calmar, 'cum_ret': pw.cum_ret,
+                    'mdd': abs(pw.mdd) if np.isfinite(pw.mdd) else np.nan,
+                    'mer': mean_excess_return_series(eq_weight_series, bench_apply_dc),
+                })
+
+                # Subperiods — three fixed 3y windows (Treynor vs direction-consistent NET bench)
+                for i, (s, e) in enumerate(splits, start=1):
+                    sb = top1_baseline[(top1_baseline.index >= s) & (top1_baseline.index <= e)]
+                    sg = top1_gps[(top1_gps.index >= s) & (top1_gps.index <= e)]
+                    sw = eq_weight_series[(eq_weight_series.index >= s) & (eq_weight_series.index <= e)]
+
+                    sub_metrics[direction]['baseline'][i].append(perf_from_monthly(sb))
+                    sub_metrics[direction]['gps'][i].append(perf_from_monthly(sg))
+                    sub_metrics[direction]['weighted'][i].append(perf_from_monthly(sw))
+
+                    bench_win_dc = bench_apply_dc[(bench_apply_dc.index >= s) & (bench_apply_dc.index <= e)]
+                    sub_treynor[direction]['baseline'][i].append(treynor_ratio_series(sb, bench_win_dc))
+                    sub_treynor[direction]['gps'][i].append(treynor_ratio_series(sg, bench_win_dc))
+                    sub_treynor[direction]['weighted'][i].append(treynor_ratio_series(sw, bench_win_dc))
+
+            # progress
+            if (run % 10) == 0:
+                elapsed = time.time() - t0
+                print(f"  Progress: completed {run:>4}/{n_runs:<4} runs | elapsed {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
+
+        # === Build & save the Top-5 selection-share tables (per direction) ===
+        if SAVE_TICKER_CHOICES_CSV and choice_records:
+            df_choices = pd.DataFrame(choice_records)
+
+            section("Top-5 selection share tables (per month)")
+
+            for direction in ('long', 'short'):
+                tbl = build_monthly_top5_table(df_choices, direction, n_runs, top_k=5)
+                out_path = OUT_DIR_MC / f"top5_selections_table_{direction}.csv"
+                tbl.to_csv(out_path, index=False)
+
+                print(f"Direction: {direction.upper()} — Top-5 per method (Baseline first 5 columns, GPS next 5)")
+                preview = tbl.head(12).to_string(index=False)  # show first 12 months
+                print(preview + "\n")
+                print(f"Saved full table to: {out_path}\n")
+
+        # === Safe aggregators to avoid warnings (empty/all-NaN) ===
+        def _finite(x) -> np.ndarray:
+            arr = np.asarray(x, dtype=float)
+            return arr[np.isfinite(arr)]
+
+        def safe_mean(x) -> float:
+            v = _finite(x)
+            return float(v.mean()) if v.size > 0 else np.nan
+
+        def safe_median(x) -> float:
+            v = _finite(x)
+            return float(np.median(v)) if v.size > 0 else np.nan
+
+        def safe_std(x, ddof=1) -> float:
+            v = _finite(x)
+            return float(v.std(ddof=ddof)) if v.size > ddof else np.nan
+
+        def agg(perf_list: list[Perf]) -> dict[str, float]:
+            if not perf_list:
+                keys = ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']
+                return {f"{k}_mean": np.nan for k in keys} | \
+                       {f"{k}_median": np.nan for k in keys} | \
+                       {f"{k}_std": np.nan for k in keys}
+            out = {}
+            for k in ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']:
+                x = np.array([getattr(p, k) for p in perf_list], dtype=float)
+                out[f'{k}_mean']   = safe_mean(x)
+                out[f'{k}_median'] = safe_median(x)
+                out[f'{k}_std']    = safe_std(x, ddof=1)
+            return out
+
+        def treynor_stats_from_df(df: pd.DataFrame, direction: str, strategy: str) -> dict[str, float]:
+            sub = df[(df['direction'] == direction) & (df['strategy'] == strategy)]
+            vals = sub['treynor'].astype(float).values if not sub.empty else np.array([], dtype=float)
+            return {
+                'treynor_mean': safe_mean(vals),
+                'treynor_median': safe_median(vals),
+                'treynor_std': safe_std(vals, ddof=1)
+            }
+
+        df_metrics_all = pd.DataFrame(metrics_rows) if metrics_rows else None
+
+        # === Print LONG first, divider, then SHORT ===
+        for direction in ('long', 'short'):
+            n_runs_local = n_runs
+            agg_full_b = agg(full_metrics[direction]['baseline'])
+            agg_full_g = agg(full_metrics[direction]['gps'])
+            agg_full_w = agg(full_metrics[direction]['weighted'])
+
+            trey_b = treynor_stats_from_df(df_metrics_all, direction, 'baseline') if df_metrics_all is not None else {}
+            trey_g = treynor_stats_from_df(df_metrics_all, direction, 'gps')      if df_metrics_all is not None else {}
+            trey_w = treynor_stats_from_df(df_metrics_all, direction, 'weighted')  if df_metrics_all is not None else {}
+
+            section(f"MONTE CARLO SUMMARY — Direction: {direction.upper()}")
+
+            print("Config")
+            print(f"  Lookback: {LOOKBACK_YEARS}y")
+            print(f"  Test    : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}  ({SIM_YEARS}y)")
+            print(f"  Apply   : {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
+            print(f"  GPS     : rolling={GPS_ROLLING_ENABLED}, calib={GPS_CALIB_YEARS}y   | Entry cost={ENTRY_COST:.4f}\n")
+
+            print("Outcome counts (Top-1 over apply)")
+            print(f"  {'Strategy':<10} {'Pos(+)':>7} {'Neg(-)':>7}")
+            print(f"  {'-'*10} {'-'*7:>7} {'-'*7:>7}")
+            print(f"  {'Baseline':<10} {pos_counts[direction]['baseline']:>7} {neg_counts[direction]['baseline']:>7}")
+            print(f"  {'GPS':<5}      {pos_counts[direction]['gps']:>7} {neg_counts[direction]['gps']:>7}")
+            print(f"  {'Weighted':<10} {pos_counts[direction]['weighted']:>7} {neg_counts[direction]['weighted']:>7}\n")
+
+            def pretty_full(d, t, name):
+                print(f"{name} — Full Apply Period (across {n_runs_local} runs)")
+                print(f"  CumRet    mean={d['cum_ret_mean']:.4f}   median={d['cum_ret_median']:.4f}   sd={d['cum_ret_std']:.4f}")
+                print(f"  CAGR      mean={d['cagr_mean']:.4f}     median={d['cagr_median']:.4f}     sd={d['cagr_std']:.4f}")
+                print(f"  Sharpe    mean={d['sharpe_mean']:.3f}   median={d['sharpe_median']:.3f}   sd={d['sharpe_std']:.3f}")
+                print(f"  Sortino   mean={d['sortino_mean']:.3f}  median={d['sortino_median']:.3f}  sd={d['sortino_std']:.3f}")
+                print(f"  Calmar    mean={d['calmar_mean']:.3f}   median={d['calmar_median']:.3f}   sd={d['calmar_std']:.3f}")
+                print(f"  MaxDD     mean={d['mdd_mean']:.3f}      median={d['mdd_median']:.3f}      sd={d['mdd_std']:.3f}")
+                print(f"  Treynor   mean={t.get('treynor_mean', np.nan):.3f}   median={t.get('treynor_median', np.nan):.3f}   sd={t.get('treynor_std', np.nan):.3f}\n")
+
+            pretty_full(agg_full_b, trey_b, "BASELINE")
+            pretty_full(agg_full_g, trey_g, "GPS")
+            pretty_full(agg_full_w, trey_w, "WEIGHTED")
+
+            print("Subperiods — Three fixed 3-year windows")
             for i, (s, e) in enumerate(splits, start=1):
-                sb = top1_baseline[(top1_baseline.index >= s) & (top1_baseline.index <= e)]
-                sg = top1_gps[(top1_gps.index >= s) & (top1_gps.index <= e)]
-                sub_metrics[direction]['baseline'][i].append(perf_from_monthly(sb))
-                sub_metrics[direction]['gps'][i].append(perf_from_monthly(sg))
+                ab = agg(sub_metrics[direction]['baseline'][i])
+                ag = agg(sub_metrics[direction]['gps'][i])
+                aw = agg(sub_metrics[direction]['weighted'][i])
 
-        # progress
-        if (run % 10) == 0:
-            elapsed = time.time() - t0
-            print(f"  Completed {run}/{n_runs} runs | elapsed {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
+                tb_arr = np.array(sub_treynor[direction]['baseline'][i], dtype=float)
+                tg_arr = np.array(sub_treynor[direction]['gps'][i], dtype=float)
+                tw_arr = np.array(sub_treynor[direction]['weighted'][i], dtype=float)
+                tb_mean, tb_sd = safe_mean(tb_arr), safe_std(tb_arr, ddof=1)
+                tg_mean, tg_sd = safe_mean(tg_arr), safe_std(tg_arr, ddof=1)
+                tw_mean, tw_sd = safe_mean(tw_arr), safe_std(tw_arr, ddof=1)
 
-    # Write unified choices CSV
-    if SAVE_TICKER_CHOICES_CSV and choice_records:
-        df_choices = pd.DataFrame(choice_records)
-        df_choices.to_csv(OUT_DIR_MC / "top1_ticker_choices_all_runs.csv", index=False)
+                print(f"\n  Window {i}: {s.date()} → {e.date()}")
+                print(f"    {'Metric':<14} {'Baseline':>12} {'GPS':>12} {'Weighted':>12}")
+                print(f"    {'-'*14:<14} {'-'*12:>12} {'-'*12:>12} {'-'*12:>12}")
+                def line3(label, f, g, w, fmt=".4f"):
+                    lf = f if np.isfinite(f) else np.nan
+                    lg = g if np.isfinite(g) else np.nan
+                    lw = w if np.isfinite(w) else np.nan
+                    print(f"    {label:<14} {lf:>12{fmt}} {lg:>12{fmt}} {lw:>12{fmt}}")
 
-    # === Reporting helpers ===
-    def agg(perf_list: list[Perf]) -> dict[str, float]:
-        out = {}
-        for k in ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']:
-            x = np.array([getattr(p, k) for p in perf_list], float)
-            out[f'{k}_mean']   = float(np.nanmean(x))
-            out[f'{k}_median'] = float(np.nanmedian(x))
-            out[f'{k}_std']    = float(np.nanstd(x, ddof=1))
-        return out
+                line3("CumRet mean",  ab['cum_ret_mean'],  ag['cum_ret_mean'],  aw['cum_ret_mean'])
+                line3("CAGR mean",    ab['cagr_mean'],     ag['cagr_mean'],     aw['cagr_mean'])
+                line3("Sharpe mean",  ab['sharpe_mean'],   ag['sharpe_mean'],   aw['sharpe_mean'], fmt=".3f")
+                line3("Calmar mean",  ab['calmar_mean'],   ag['calmar_mean'],   aw['calmar_mean'], fmt=".3f")
+                line3("MaxDD mean",   ab['mdd_mean'],      ag['mdd_mean'],      aw['mdd_mean'],    fmt=".3f")
+                line3("Treynor mean", tb_mean,             tg_mean,             tw_mean,           fmt=".3f")
 
-    def paired_test(b_list: list[Perf], g_list: list[Perf], attr: str):
-        b = np.array([getattr(p, attr) for p in b_list], float)
-        g = np.array([getattr(p, attr) for p in g_list], float)
-        mask = np.isfinite(b) & np.isfinite(g)
-        if mask.sum() < 3:
-            return None, None, 0
-        t, p = st.ttest_rel(g[mask], b[mask], alternative='greater')
-        return float(t), float(p), int(mask.sum())
+            section("Significance — Paired, one-sided both directions (per-side α = {:.3f}; overall two-sided 5%)".format(PER_SIDE_ALPHA))
 
-    def pretty_full(d, name):
-        print(f"{name} — FULL PERIOD across runs (Top-1 only):")
-        print(f"  CumRet   mean={d['cum_ret_mean']:.4f}  median={d['cum_ret_median']:.4f}  sd={d['cum_ret_std']:.4f}")
-        print(f"  CAGR     mean={d['cagr_mean']:.4f}    median={d['cagr_median']:.4f}    sd={d['cagr_std']:.4f}")
-        print(f"  Sharpe   mean={d['sharpe_mean']:.3f}  median={d['sharpe_median']:.3f}  sd={d['sharpe_std']:.3f}")
-        print(f"  Sortino  mean={d['sortino_mean']:.3f} median={d['sortino_median']:.3f} sd={d['sortino_std']:.3f}")
-        print(f"  Calmar   mean={d['calmar_mean']:.3f}  median={d['calmar_median']:.3f}  sd={d['calmar_std']:.3f}")
-        print(f"  MDD      mean={d['mdd_mean']:.3f}     median={d['mdd_median']:.3f}     sd={d['mdd_std']:.3f}")
-        print(f"  Vol(within) mean={d['stdev_mean']:.4f}   median={d['stdev_median']:.4f}   RunSD={d['stdev_std']:.4f}")
+            # Build arrays for metrics from Perf lists
+            b_list = full_metrics[direction]['baseline']
+            g_list = full_metrics[direction]['gps']
+            w_list = full_metrics[direction]['weighted']
+            arr = lambda attr, L: np.array([getattr(p, attr) for p in L], dtype=float)
 
-    # === Print LONG first, divider, then SHORT ===
-    for direction in ('long', 'short'):
-        n_runs_local = n_runs
-        agg_full_b = agg(full_metrics[direction]['baseline'])
-        agg_full_g = agg(full_metrics[direction]['gps'])
+            def sig_pair_block(left_label, right_label, L_list, R_list, df_dir_metrics):
+                print(f"[ {left_label.upper()}  →  {right_label.upper()} ]")
+                for name, attr in [("Return", "cum_ret"),
+                                   ("CAGR", "cagr"),
+                                   ("Sharpe", "sharpe"),
+                                   ("Sortino", "sortino"),
+                                   ("Calmar", "calmar")]:
+                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(arr(attr, L_list), arr(attr, R_list))
+                    print_sig_line_generic(name, left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="higher is better")
+                # Treynor from df_metrics_all by pair
+                df_dir = df_metrics_all[df_metrics_all['direction'] == direction] if df_metrics_all is not None else pd.DataFrame()
+                t_g, p_g, t_l, p_l, n = paired_one_sided_both_from_df(df_dir, left_label.lower(), right_label.lower(), 'treynor')
+                print_sig_line_generic("Treynor", left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="higher is better")
+                # MaxDD: Perf.mdd is negative, less severe (closer to 0, i.e., higher) is better
+                t_g, p_g, t_l, p_l, n = paired_one_sided_both(arr("mdd", L_list), arr("mdd", R_list))
+                print_sig_line_generic("MaxDD", left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="less severe (higher)")
+                print("")  # spacer
 
-        # add Sharpe to the significance battery
-        t_ret,    p_ret,    n_ret    = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'cum_ret')
-        t_cagr,   p_cagr,   n_cagr   = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'cagr')
-        t_sharpe, p_sharpe, n_sharpe = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'sharpe')
-        t_sort,   p_sort,   n_sort   = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'sortino')
-        t_calmar, p_calmar, n_calmar = paired_test(full_metrics[direction]['baseline'], full_metrics[direction]['gps'], 'calmar')
+            sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all if df_metrics_all is not None else pd.DataFrame())
+            sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all if df_metrics_all is not None else pd.DataFrame())
+            sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all if df_metrics_all is not None else pd.DataFrame())
 
-        print("\n" + "="*96)
-        print(f"MONTE CARLO — MONTHLY (N={n_runs_local}, λ={lam}, backcast={BACKCAST_N}, dir={direction}, zero_noise={zero_noise})")
-        print("-"*96)
-        print(f"Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
-              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()} | RLSSA(L={SSA_WINDOW}, q={SSA_COMPS}, scale={'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'})")
-        print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib_window={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST}")
-        print("-"*96)
-        print("Final outcome counts over apply period (Top-1 only):")
-        print(f"  Baseline : +{pos_counts[direction]['baseline']:3d}   -{neg_counts[direction]['baseline']:3d}")
-        print(f"  GPS      : +{pos_counts[direction]['gps']:3d}   -{neg_counts[direction]['gps']:3d}")
-        print("-"*96)
+            if direction == 'long':
+                print(rule("─"))
+                print("")
 
-        pretty_full(agg_full_b, "BASELINE")
-        pretty_full(agg_full_g, "GPS")
+        total_elapsed = time.time() - t0
+        section("Completed")
+        print(f"Total runtime: {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}\n")
 
-        print("-"*96)
-        print("Three fixed 3-year subperiod statistics across runs (Top-1 only):")
-        for i, (s, e) in enumerate(splits, start=1):
-            ab = agg(sub_metrics[direction]['baseline'][i])
-            ag = agg(sub_metrics[direction]['gps'][i])
-            print(f"  Window {i}: {s.date()} → {e.date()}")
-            print(f"    Baseline: Ret(mean)={ab['cum_ret_mean']:.4f}  Ret(median)={ab['cum_ret_median']:.4f}  "
-                  f"RunSD={ab['cum_ret_std']:.4f}  Vol(within)={ab['stdev_mean']:.4f}  "
-                  f"CAGR(mean)={ab['cagr_mean']:.4f} (sd={ab['cagr_std']:.4f})  "
-                  f"Sharpe(mean)={ab['sharpe_mean']:.3f} (sd={ab['sharpe_std']:.3f})  "
-                  f"Calmar(mean)={ab['calmar_mean']:.3f} (sd={ab['calmar_std']:.3f})")
-            print(f"    GPS     : Ret(mean)={ag['cum_ret_mean']:.4f}  Ret(median)={ag['cum_ret_median']:.4f}  "
-                  f"RunSD={ag['cum_ret_std']:.4f}  Vol(within)={ag['stdev_mean']:.4f}  "
-                  f"CAGR(mean)={ag['cagr_mean']:.4f} (sd={ag['cagr_std']:.4f})  "
-                  f"Sharpe(mean)={ag['sharpe_mean']:.3f} (sd={ag['sharpe_std']:.3f})  "
-                  f"Calmar(mean)={ag['calmar_mean']:.3f} (sd={ag['calmar_std']:.3f})")
+        # === Save metrics table (NO correlation/heatmap here) ===
+        if metrics_rows:
+            df_metrics = pd.DataFrame(metrics_rows)
+            df_metrics.to_csv(OUT_DIR_MC / "performance_metrics_by_portfolio.csv", index=False)
 
-        print("-"*96)
-        print("Significance (paired, one-sided H1: GPS > Baseline) — full apply period, Top-1 only:")
-        if n_ret >= 3:
-            print(f"  Return   : t={t_ret:.3f},   p={p_ret:.4f}   -> {'GPS better at 5%' if p_ret is not None and p_ret < 0.05 else 'no sig diff at 5%'}")
-        else:
-            print("  Return   : insufficient valid pairs.")
-        if n_cagr >= 3:
-            print(f"  CAGR     : t={t_cagr:.3f},  p={p_cagr:.4f}  -> {'GPS better at 5%' if p_cagr is not None and p_cagr < 0.05 else 'no sig diff at 5%'}")
-        else:
-            print("  CAGR     : insufficient valid pairs.")
-        if n_sharpe >= 3:
-            print(f"  Sharpe   : t={t_sharpe:.3f},  p={p_sharpe:.4f}  -> {'GPS better at 5%' if p_sharpe is not None and p_sharpe < 0.05 else 'no sig diff at 5%'}")
-        else:
-            print("  Sharpe   : insufficient valid pairs.")
-        if n_sort >= 3:
-            print(f"  Sortino  : t={t_sort:.3f},  p={p_sort:.4f}  -> {'GPS better at 5%' if p_sort is not None and p_sort < 0.05 else 'no sig diff at 5%'}")
-        else:
-            print("  Sortino  : insufficient valid pairs.")
-        if n_calmar >= 3:
-            print(f"  Calmar   : t={t_calmar:.3f}, p={p_calmar:.4f} -> {'GPS better at 5%' if p_calmar is not None and p_calmar < 0.05 else 'no sig diff at 5%'}")
-        else:
-            print("  Calmar   : insufficient valid pairs.")
+    # === Write terminal printout to file ===
+    with open(OUT_DIR_MC / "console_report.txt", "w", encoding="utf-8") as f:
+        f.write(buf.getvalue())
 
-        if direction == 'long':
-            print("")
-            print("#" * 96)
-
-    total_elapsed = time.time() - t0
-    print(f"Total runtime (both directions): {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}")
-    print("="*96 + "\n")
 
 # =============================== #
-# 11) RUN — single efficient call
+# 13) RUN — single efficient call
 # =============================== #
 if __name__ == "__main__":
     run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)
