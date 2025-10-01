@@ -35,7 +35,7 @@ ENTRY_COST              = 0.0025                 # apply ONCE per month
 # ===== SSA params (replaces DVR) =====
 SSA_WINDOW              = 12                     # embedding dimension L
 SSA_COMPS               = 2                      # rank r (number of components)
-SSA_USE_EWMA_SCALE      = False                  # if True, scale score by EWMA sigma of simple returns
+SSA_USE_EWMA_SCALE      = True                  # if True, scale score by EWMA sigma of simple returns
 SSA_EWMA_LAMBDA         = 0.94
 MIN_OBS_FOR_VOL         = 12
 
@@ -54,7 +54,7 @@ GPS_SCORE_COMPONENTS = ["Seasonality", "Sharpe", "Cum_ret", "Information"]
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 10
+MC_RUNS                 = 1000
 LAMBDA_EWMA             = 0.94
 BACKCAST_N              = 12
 RNG_SEED                = 42

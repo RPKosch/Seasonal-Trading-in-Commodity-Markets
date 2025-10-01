@@ -54,7 +54,7 @@ GPS_SCORE_COMPONENTS = ["Seasonality", "Sharpe", "Cum_ret", "Information"]
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 10
+MC_RUNS                 = 1000
 LAMBDA_EWMA             = 0.94
 BACKCAST_N              = 12
 RNG_SEED                = 42

@@ -1,7 +1,6 @@
 import io, sys, time
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm  # kept for parity/extensibility
 from pathlib import Path
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -53,7 +52,7 @@ GPS_SCORE_COMPONENTS = ["Seasonality", "Sharpe", "Cum_ret", "Information"]
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 10
+MC_RUNS                 = 1000
 LAMBDA_EWMA             = 0.94                   # for EWMA-projected sigma used in noise injection
 BACKCAST_N              = 12
 RNG_SEED                = 42

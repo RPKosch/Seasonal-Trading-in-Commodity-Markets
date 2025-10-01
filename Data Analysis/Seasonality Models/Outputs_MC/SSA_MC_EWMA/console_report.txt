@@ -1,0 +1,377 @@
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Starting Monte Carlo — BOTH directions | runs=1,000 | lambda=0.94 | zero_noise=False
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+SSA ranking config: L=12, r=2, scale=EWMA
+
+  Progress: completed   10/1000 runs | elapsed 00:00:59
+  Progress: completed   20/1000 runs | elapsed 00:02:04
+  Progress: completed   30/1000 runs | elapsed 00:03:14
+  Progress: completed   40/1000 runs | elapsed 00:04:22
+  Progress: completed   50/1000 runs | elapsed 00:05:30
+  Progress: completed   60/1000 runs | elapsed 00:06:40
+  Progress: completed   70/1000 runs | elapsed 00:07:50
+  Progress: completed   80/1000 runs | elapsed 00:09:00
+  Progress: completed   90/1000 runs | elapsed 00:10:10
+  Progress: completed  100/1000 runs | elapsed 00:11:21
+  Progress: completed  110/1000 runs | elapsed 00:12:30
+  Progress: completed  120/1000 runs | elapsed 00:13:39
+  Progress: completed  130/1000 runs | elapsed 00:14:48
+  Progress: completed  140/1000 runs | elapsed 00:15:57
+  Progress: completed  150/1000 runs | elapsed 00:17:05
+  Progress: completed  160/1000 runs | elapsed 00:18:14
+  Progress: completed  170/1000 runs | elapsed 00:19:22
+  Progress: completed  180/1000 runs | elapsed 00:20:32
+  Progress: completed  190/1000 runs | elapsed 00:21:40
+  Progress: completed  200/1000 runs | elapsed 00:22:49
+  Progress: completed  210/1000 runs | elapsed 00:23:57
+  Progress: completed  220/1000 runs | elapsed 00:25:06
+  Progress: completed  230/1000 runs | elapsed 00:26:14
+  Progress: completed  240/1000 runs | elapsed 00:27:23
+  Progress: completed  250/1000 runs | elapsed 00:28:31
+  Progress: completed  260/1000 runs | elapsed 00:29:40
+  Progress: completed  270/1000 runs | elapsed 00:30:49
+  Progress: completed  280/1000 runs | elapsed 00:31:57
+  Progress: completed  290/1000 runs | elapsed 00:33:05
+  Progress: completed  300/1000 runs | elapsed 00:34:14
+  Progress: completed  310/1000 runs | elapsed 00:35:22
+  Progress: completed  320/1000 runs | elapsed 00:36:31
+  Progress: completed  330/1000 runs | elapsed 00:37:40
+  Progress: completed  340/1000 runs | elapsed 00:38:48
+  Progress: completed  350/1000 runs | elapsed 00:39:57
+  Progress: completed  360/1000 runs | elapsed 00:41:05
+  Progress: completed  370/1000 runs | elapsed 00:42:14
+  Progress: completed  380/1000 runs | elapsed 00:43:22
+  Progress: completed  390/1000 runs | elapsed 00:44:31
+  Progress: completed  400/1000 runs | elapsed 00:45:38
+  Progress: completed  410/1000 runs | elapsed 00:46:47
+  Progress: completed  420/1000 runs | elapsed 00:47:55
+  Progress: completed  430/1000 runs | elapsed 00:49:04
+  Progress: completed  440/1000 runs | elapsed 00:50:12
+  Progress: completed  450/1000 runs | elapsed 00:51:21
+  Progress: completed  460/1000 runs | elapsed 00:52:29
+  Progress: completed  470/1000 runs | elapsed 00:53:37
+  Progress: completed  480/1000 runs | elapsed 00:54:45
+  Progress: completed  490/1000 runs | elapsed 00:55:53
+  Progress: completed  500/1000 runs | elapsed 00:57:01
+  Progress: completed  510/1000 runs | elapsed 00:58:10
+  Progress: completed  520/1000 runs | elapsed 00:59:18
+  Progress: completed  530/1000 runs | elapsed 01:00:26
+  Progress: completed  540/1000 runs | elapsed 01:01:35
+  Progress: completed  550/1000 runs | elapsed 01:02:43
+  Progress: completed  560/1000 runs | elapsed 01:03:52
+  Progress: completed  570/1000 runs | elapsed 01:05:00
+  Progress: completed  580/1000 runs | elapsed 01:06:08
+  Progress: completed  590/1000 runs | elapsed 01:07:16
+  Progress: completed  600/1000 runs | elapsed 01:08:24
+  Progress: completed  610/1000 runs | elapsed 01:09:32
+  Progress: completed  620/1000 runs | elapsed 01:10:41
+  Progress: completed  630/1000 runs | elapsed 01:11:49
+  Progress: completed  640/1000 runs | elapsed 01:12:57
+  Progress: completed  650/1000 runs | elapsed 01:14:06
+  Progress: completed  660/1000 runs | elapsed 01:15:14
+  Progress: completed  670/1000 runs | elapsed 01:16:22
+  Progress: completed  680/1000 runs | elapsed 01:17:30
+  Progress: completed  690/1000 runs | elapsed 01:18:39
+  Progress: completed  700/1000 runs | elapsed 01:19:47
+  Progress: completed  710/1000 runs | elapsed 01:20:55
+  Progress: completed  720/1000 runs | elapsed 01:22:02
+  Progress: completed  730/1000 runs | elapsed 01:23:10
+  Progress: completed  740/1000 runs | elapsed 01:24:18
+  Progress: completed  750/1000 runs | elapsed 01:25:26
+  Progress: completed  760/1000 runs | elapsed 01:26:35
+  Progress: completed  770/1000 runs | elapsed 01:27:46
+  Progress: completed  780/1000 runs | elapsed 01:28:55
+  Progress: completed  790/1000 runs | elapsed 01:30:02
+  Progress: completed  800/1000 runs | elapsed 01:31:11
+  Progress: completed  810/1000 runs | elapsed 01:32:19
+  Progress: completed  820/1000 runs | elapsed 01:33:26
+  Progress: completed  830/1000 runs | elapsed 01:34:34
+  Progress: completed  840/1000 runs | elapsed 01:35:42
+  Progress: completed  850/1000 runs | elapsed 01:36:50
+  Progress: completed  860/1000 runs | elapsed 01:37:58
+  Progress: completed  870/1000 runs | elapsed 01:39:06
+  Progress: completed  880/1000 runs | elapsed 01:40:14
+  Progress: completed  890/1000 runs | elapsed 01:41:21
+  Progress: completed  900/1000 runs | elapsed 01:42:29
+  Progress: completed  910/1000 runs | elapsed 01:43:37
+  Progress: completed  920/1000 runs | elapsed 01:44:45
+  Progress: completed  930/1000 runs | elapsed 01:45:53
+  Progress: completed  940/1000 runs | elapsed 01:47:01
+  Progress: completed  950/1000 runs | elapsed 01:48:09
+  Progress: completed  960/1000 runs | elapsed 01:49:16
+  Progress: completed  970/1000 runs | elapsed 01:50:24
+  Progress: completed  980/1000 runs | elapsed 01:51:32
+  Progress: completed  990/1000 runs | elapsed 01:52:39
+  Progress: completed 1000/1000 runs | elapsed 01:53:47
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Top-5 selection share tables (per month)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Direction: LONG — Top-5 per method (Baseline first 5 columns, GPS next 5)
+   Date          B1            B2            B3            B4            B5           G1            G2            G3           G4           G5    
+2016-01-01  [CC | 22.3%]  [ZW | 14.6%]  [ZS | 10.0%]  [HE | 9.3%]   [ZC | 8.3%]  [CC | 12.4%]  [CP | 9.4%]   [ZW | 8.7%]  [ZS | 7.5%]  [LE | 7.0%]
+2016-02-01  [LE | 12.6%]  [CF | 11.4%]  [ZW | 10.0%]  [HE | 9.7%]   [CP | 9.0%]  [CP | 10.6%]  [LE | 8.8%]   [CT | 8.5%]  [ZC | 7.8%]  [ZS | 7.5%]
+2016-03-01  [ZW | 16.4%]  [CP | 11.7%]  [LE | 11.3%]  [HO | 9.1%]   [ZS | 7.7%]  [CP | 9.3%]   [CC | 9.0%]   [ZW | 8.5%]  [HO | 7.9%]  [SV | 7.9%]
+2016-04-01  [ZW | 16.2%]  [HO | 14.9%]  [SU | 12.7%]  [CO | 10.6%]  [LE | 9.6%]  [HO | 9.6%]   [SU | 8.6%]   [CO | 8.6%]  [CP | 7.7%]  [ZW | 7.5%]
+2016-05-01  [HO | 24.9%]  [CO | 17.2%]  [LE | 15.7%]  [ZS | 6.6%]   [HE | 6.0%]  [CO | 12.2%]  [HO | 11.8%]  [ZS | 8.3%]  [LE | 8.2%]  [CT | 7.6%]
+2016-06-01  [HO | 33.5%]  [CO | 25.9%]  [ZW | 7.9%]   [HE | 7.1%]   [CC | 4.4%]  [CO | 13.5%]  [HO | 12.2%]  [CC | 8.3%]  [HE | 7.2%]  [CT | 7.2%]
+2016-07-01  [HO | 25.2%]  [CO | 21.3%]  [LE | 16.4%]  [ZW | 10.5%]  [GD | 4.7%]  [HO | 13.7%]  [CO | 13.3%]  [LE | 8.1%]  [ZW | 7.3%]  [ZS | 6.3%]
+2016-08-01  [HO | 15.1%]  [LE | 14.9%]  [CO | 10.5%]  [GD | 10.5%]  [ZW | 7.0%]  [HO | 8.8%]   [ZS | 8.6%]   [CO | 8.3%]  [CC | 8.1%]  [CT | 8.1%]
+2016-09-01  [LE | 16.2%]  [HO | 12.8%]  [CO | 11.6%]  [HE | 7.6%]   [NG | 7.0%]  [LE | 7.8%]   [HO | 7.3%]   [CO | 7.3%]  [CT | 7.1%]  [ZS | 7.0%]
+2016-10-01  [LE | 20.4%]  [HE | 11.9%]  [SU | 11.7%]  [HO | 11.0%]  [CO | 7.0%]  [SU | 10.4%]  [HO | 8.8%]   [ZS | 8.7%]  [CC | 7.2%]  [HE | 7.0%]
+2016-11-01  [SU | 9.5%]   [HO | 9.1%]   [HE | 8.8%]   [LE | 7.9%]   [GD | 7.6%]  [ZC | 9.2%]   [CT | 8.4%]   [SU | 7.8%]  [CC | 7.7%]  [NG | 7.0%]
+2016-12-01  [GD | 20.1%]  [HE | 16.4%]  [LE | 12.6%]  [SV | 7.3%]   [ZC | 6.0%]  [GD | 10.5%]  [HE | 9.0%]   [ZC | 7.6%]  [NG | 7.3%]  [CF | 7.2%]
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/SSA_MC_EWMA/top5_selections_table_long.csv
+
+Direction: SHORT — Top-5 per method (Baseline first 5 columns, GPS next 5)
+   Date          B1            B2            B3            B4            B5            G1            G2            G3           G4           G5    
+2016-01-01  [HO | 17.5%]  [HE | 11.8%]  [CO | 11.8%]  [LE | 10.5%]  [ZW | 9.2%]   [HO | 9.6%]   [HE | 8.6%]   [CO | 8.5%]  [GD | 8.3%]  [SU | 8.0%]
+2016-02-01  [ZW | 14.3%]  [HO | 12.2%]  [CO | 10.2%]  [HE | 10.1%]  [SU | 10.1%]  [HO | 9.8%]   [CO | 9.6%]   [NG | 8.4%]  [SU | 7.8%]  [HE | 7.4%]
+2016-03-01  [HE | 14.4%]  [LE | 13.2%]  [HO | 13.2%]  [CO | 9.3%]   [ZS | 9.1%]   [HE | 10.3%]  [NG | 8.1%]   [HO | 7.7%]  [CO | 7.6%]  [CT | 7.5%]
+2016-04-01  [HE | 18.4%]  [LE | 15.4%]  [ZW | 10.2%]  [ZS | 7.7%]   [NG | 7.7%]   [NG | 9.6%]   [HE | 9.0%]   [LE | 8.3%]  [CF | 7.9%]  [GD | 7.7%]
+2016-05-01  [ZW | 20.9%]  [LE | 13.3%]  [HE | 11.4%]  [GD | 9.3%]   [CC | 6.2%]   [HE | 10.9%]  [SV | 9.1%]   [ZW | 8.6%]  [GD | 8.4%]  [LE | 7.6%]
+2016-06-01  [LE | 27.3%]  [ZW | 12.4%]  [CF | 10.1%]  [SU | 9.3%]   [HE | 8.2%]   [LE | 10.7%]  [SU | 10.0%]  [CF | 9.6%]  [HE | 8.6%]  [NG | 7.5%]
+2016-07-01  [SU | 17.4%]  [LE | 15.1%]  [HE | 9.0%]   [GD | 8.7%]   [ZW | 8.4%]   [SU | 9.7%]   [CC | 9.1%]   [CT | 7.7%]  [LE | 7.5%]  [SV | 7.3%]
+2016-08-01  [LE | 22.2%]  [HE | 17.6%]  [SU | 12.9%]  [ZW | 7.6%]   [HO | 6.8%]   [LE | 12.2%]  [SU | 11.0%]  [HE | 9.3%]  [NG | 7.5%]  [ZC | 7.2%]
+2016-09-01  [LE | 19.7%]  [HO | 12.2%]  [CO | 10.7%]  [GD | 8.7%]   [HE | 8.6%]   [LE | 9.3%]   [CC | 8.9%]   [HE | 8.5%]  [CO | 7.6%]  [CP | 7.6%]
+2016-10-01  [LE | 17.2%]  [HO | 13.0%]  [GD | 11.1%]  [CO | 9.9%]   [HE | 8.2%]   [CP | 9.1%]   [LE | 8.5%]   [GD | 8.4%]  [NG | 7.2%]  [HE | 6.9%]
+2016-11-01  [HE | 25.2%]  [LE | 25.1%]  [HO | 11.6%]  [CO | 7.0%]   [ZS | 5.6%]   [HE | 11.5%]  [LE | 11.2%]  [HO | 9.5%]  [CO | 7.1%]  [CC | 6.9%]
+2016-12-01  [HO | 16.9%]  [LE | 12.8%]  [SU | 11.9%]  [CO | 11.2%]  [HE | 7.4%]   [HO | 10.0%]  [CO | 9.0%]   [LE | 8.3%]  [SU | 8.3%]  [CT | 7.3%]
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/SSA_MC_EWMA/top5_selections_table_short.csv
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: LONG
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Test    : 2011-01-01 → 2015-12-31  (5y)
+  Apply   : 2016-01-01 → 2024-12-31
+  SSA     : L=12, r=2, scale=EWMA   | GPS rolling=True, calib=5y   | Entry cost=0.0025
+
+Outcome counts (Top-1 over apply)
+  Strategy    Pos(+)  Neg(-)
+  ---------- ------- -------
+  Baseline       422     578
+  GPS       393     607
+  Weighted       960      40
+
+BASELINE — Full Apply Period (across 1000 runs)
+  CumRet    mean=0.8578   median=-0.2277   sd=4.1289
+  CAGR      mean=-0.0172     median=-0.0283     sd=0.1446
+  Sharpe    mean=0.169   median=0.178   sd=0.304
+  Sortino   mean=0.348  median=0.313  sd=0.582
+  Calmar    mean=0.004   median=-0.036   sd=0.210
+  MaxDD     mean=-0.786      median=-0.810      sd=0.125
+  Treynor   mean=0.066   median=0.070   sd=0.135
+  Vol(within-month) mean=0.1420   median=0.1400   run-sd=0.0184
+
+GPS — Full Apply Period (across 1000 runs)
+  CumRet    mean=0.5138   median=-0.2504   sd=2.7799
+  CAGR      mean=-0.0208     median=-0.0315     sd=0.1260
+  Sharpe    mean=0.128   median=0.124   sd=0.310
+  Sortino   mean=0.269  median=0.212  sd=0.580
+  Calmar    mean=-0.000   median=-0.043   sd=0.196
+  MaxDD     mean=-0.738      median=-0.755      sd=0.135
+  Treynor   mean=0.058   median=0.051   sd=0.152
+  Vol(within-month) mean=0.1213   median=0.1186   run-sd=0.0171
+
+WEIGHTED — Full Apply Period (across 1000 runs)
+  CumRet    mean=0.5344   median=0.4927   sd=0.3494
+  CAGR      mean=0.0461     median=0.0455     sd=0.0262
+  Sharpe    mean=0.380   median=0.378   sd=0.172
+  Sortino   mean=0.615  median=0.605  sd=0.290
+  Calmar    mean=0.130   median=0.118   sd=0.086
+  MaxDD     mean=-0.384      median=-0.384      sd=0.063
+  Treynor   mean=0.055   median=0.055   sd=0.025
+  Vol(within-month) mean=0.0419   median=0.0419   run-sd=0.0021
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.0045      -0.1073      -0.0762
+    CAGR mean           -0.0341      -0.0690      -0.0274
+    Sharpe mean           0.011       -0.099       -0.220
+    Calmar mean           0.040       -0.044       -0.101
+    MaxDD mean           -0.473       -0.487       -0.197
+    Treynor mean          0.011       -0.066       -0.023
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.5107       0.3635       0.3081
+    CAGR mean            0.0702       0.0472       0.0916
+    Sharpe mean           0.282        0.238        0.590
+    Calmar mean           0.280        0.256        0.361
+    MaxDD mean           -0.547       -0.502       -0.268
+    Treynor mean          0.139        0.227        0.102
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.2491       0.2607       0.2681
+    CAGR mean           -0.0175       0.0148       0.0801
+    Sharpe mean           0.139        0.168        0.583
+    Calmar mean           0.090        0.187        0.525
+    MaxDD mean           -0.664       -0.549       -0.192
+    Treynor mean          0.092        0.121        0.087
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, one-sided both directions (per-side α = 0.025; overall two-sided 5%)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ BASELINE  →  GPS ]
+    gps vs baseline — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=-3.090, p=0.9990 -> no better effect at 5% | worse: t=-3.090, p=0.0010 -> gps worse at 5% two-sided
+    gps vs baseline — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=-0.632, p=0.7364 -> no better effect at 5% | worse: t=-0.632, p=0.2636 -> no worse effect at 5%
+    gps vs baseline — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=-3.256, p=0.9994 -> no better effect at 5% | worse: t=-3.256, p=0.0006 -> gps worse at 5% two-sided
+    gps vs baseline — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=-3.321, p=0.9995 -> no better effect at 5% | worse: t=-3.321, p=0.0005 -> gps worse at 5% two-sided
+    gps vs baseline — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=-0.498, p=0.6909 -> no better effect at 5% | worse: t=-0.498, p=0.3091 -> no worse effect at 5%
+    gps vs baseline — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-1.405, p=0.9198 -> no better effect at 5% | worse: t=-1.405, p=0.0802 -> no worse effect at 5%
+    gps vs baseline — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-8.545, p=1.0000 -> no better effect at 5% | worse: t=-8.545, p=0.0000 -> gps worse at 5% two-sided
+
+[ BASELINE  →  WEIGHTED ]
+    weighted vs baseline — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=-2.498, p=0.9937 -> no better effect at 5% | worse: t=-2.498, p=0.0063 -> weighted worse at 5% two-sided
+    weighted vs baseline — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=14.170, p=0.0000 -> weighted better at 5% two-sided | worse: t=14.170, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=21.276, p=0.0000 -> weighted better at 5% two-sided | worse: t=21.276, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=14.251, p=0.0000 -> weighted better at 5% two-sided | worse: t=14.251, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=18.925, p=0.0000 -> weighted better at 5% two-sided | worse: t=18.925, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-2.602, p=0.9953 -> no better effect at 5% | worse: t=-2.602, p=0.0047 -> weighted worse at 5% two-sided
+    weighted vs baseline — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-95.433, p=1.0000 -> no better effect at 5% | worse: t=-95.433, p=0.0000 -> weighted worse at 5% two-sided
+
+[ GPS  →  WEIGHTED ]
+    weighted vs gps — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=0.235, p=0.4070 -> no better effect at 5% | worse: t=0.235, p=0.5930 -> no worse effect at 5%
+    weighted vs gps — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=17.046, p=0.0000 -> weighted better at 5% two-sided | worse: t=17.046, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=24.425, p=0.0000 -> weighted better at 5% two-sided | worse: t=24.425, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=18.083, p=0.0000 -> weighted better at 5% two-sided | worse: t=18.083, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=20.473, p=0.0000 -> weighted better at 5% two-sided | worse: t=20.473, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-0.507, p=0.6939 -> no better effect at 5% | worse: t=-0.507, p=0.3061 -> no worse effect at 5%
+    weighted vs gps — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-78.820, p=1.0000 -> no better effect at 5% | worse: t=-78.820, p=0.0000 -> weighted worse at 5% two-sided
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: SHORT
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Test    : 2011-01-01 → 2015-12-31  (5y)
+  Apply   : 2016-01-01 → 2024-12-31
+  SSA     : L=12, r=2, scale=EWMA   | GPS rolling=True, calib=5y   | Entry cost=0.0025
+
+Outcome counts (Top-1 over apply)
+  Strategy    Pos(+)  Neg(-)
+  ---------- ------- -------
+  Baseline       516     484
+  GPS       407     593
+  Weighted       954      46
+
+BASELINE — Full Apply Period (across 1000 runs)
+  CumRet    mean=1.8100   median=0.0314   sd=6.7027
+  CAGR      mean=0.0165     median=0.0034     sd=0.1589
+  Sharpe    mean=0.235   median=0.250   sd=0.309
+  Sortino   mean=0.496  median=0.475  sd=0.627
+  Calmar    mean=0.051   median=0.004   sd=0.236
+  MaxDD     mean=-0.782      median=-0.806      sd=0.133
+  Treynor   mean=0.100   median=0.096   sd=0.143
+  Vol(within-month) mean=0.1509   median=0.1477   run-sd=0.0245
+
+GPS — Full Apply Period (across 1000 runs)
+  CumRet    mean=0.9460   median=-0.2644   sd=5.7732
+  CAGR      mean=-0.0188     median=-0.0336     sd=0.1406
+  Sharpe    mean=0.130   median=0.133   sd=0.326
+  Sortino   mean=0.294  median=0.228  sd=0.637
+  Calmar    mean=0.006   median=-0.046   sd=0.223
+  MaxDD     mean=-0.759      median=-0.784      sd=0.137
+  Treynor   mean=0.060   median=0.052   sd=0.165
+  Vol(within-month) mean=0.1277   median=0.1243   run-sd=0.0211
+
+WEIGHTED — Full Apply Period (across 1000 runs)
+  CumRet    mean=0.5095   median=0.4651   sd=0.3467
+  CAGR      mean=0.0441     median=0.0433     sd=0.0265
+  Sharpe    mean=0.356   median=0.352   sd=0.167
+  Sortino   mean=0.712  median=0.696  sd=0.356
+  Calmar    mean=0.118   median=0.106   sd=0.084
+  MaxDD     mean=-0.410      median=-0.414      sd=0.069
+  Treynor   mean=0.052   median=0.052   sd=0.025
+  Vol(within-month) mean=0.0439   median=0.0438   run-sd=0.0021
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.2664       0.2804       0.2718
+    CAGR mean            0.0442       0.0455       0.0820
+    Sharpe mean           0.229        0.230        0.779
+    Calmar mean           0.269        0.277        0.699
+    MaxDD mean           -0.430       -0.432       -0.134
+    Treynor mean          0.063        0.129        0.082
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.2156       0.0486       0.0413
+    CAGR mean           -0.0119      -0.0423       0.0117
+    Sharpe mean           0.145        0.041        0.145
+    Calmar mean           0.091        0.024        0.064
+    MaxDD mean           -0.643       -0.598       -0.320
+    Treynor mean          0.056       -0.160        0.025
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.8655       0.2358       0.1383
+    CAGR mean            0.0968      -0.0057       0.0418
+    Sharpe mean           0.288        0.093        0.334
+    Calmar mean           0.370        0.132        0.349
+    MaxDD mean           -0.537       -0.509       -0.145
+    Treynor mean          0.216        0.243        0.050
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, one-sided both directions (per-side α = 0.025; overall two-sided 5%)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ BASELINE  →  GPS ]
+    gps vs baseline — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=-4.147, p=1.0000 -> no better effect at 5% | worse: t=-4.147, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=-6.308, p=1.0000 -> no better effect at 5% | worse: t=-6.308, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=-8.577, p=1.0000 -> no better effect at 5% | worse: t=-8.577, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=-8.476, p=1.0000 -> no better effect at 5% | worse: t=-8.476, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=-5.480, p=1.0000 -> no better effect at 5% | worse: t=-5.480, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-6.381, p=1.0000 -> no better effect at 5% | worse: t=-6.381, p=0.0000 -> gps worse at 5% two-sided
+    gps vs baseline — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-4.215, p=1.0000 -> no better effect at 5% | worse: t=-4.215, p=0.0000 -> gps worse at 5% two-sided
+
+[ BASELINE  →  WEIGHTED ]
+    weighted vs baseline — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=-6.181, p=1.0000 -> no better effect at 5% | worse: t=-6.181, p=0.0000 -> weighted worse at 5% two-sided
+    weighted vs baseline — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=5.687, p=0.0000 -> weighted better at 5% two-sided | worse: t=5.687, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=12.343, p=0.0000 -> weighted better at 5% two-sided | worse: t=12.343, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=10.775, p=0.0000 -> weighted better at 5% two-sided | worse: t=10.775, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=9.149, p=0.0000 -> weighted better at 5% two-sided | worse: t=9.149, p=1.0000 -> no worse effect at 5%
+    weighted vs baseline — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-10.730, p=1.0000 -> no better effect at 5% | worse: t=-10.730, p=0.0000 -> weighted worse at 5% two-sided
+    weighted vs baseline — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-86.449, p=1.0000 -> no better effect at 5% | worse: t=-86.449, p=0.0000 -> weighted worse at 5% two-sided
+
+[ GPS  →  WEIGHTED ]
+    weighted vs gps — Return   : n=1000 | better (higher is better; α_one-sided=0.025): t=-2.410, p=0.9919 -> no better effect at 5% | worse: t=-2.410, p=0.0081 -> weighted worse at 5% two-sided
+    weighted vs gps — CAGR     : n=1000 | better (higher is better; α_one-sided=0.025): t=14.582, p=0.0000 -> weighted better at 5% two-sided | worse: t=14.582, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Sharpe   : n=1000 | better (higher is better; α_one-sided=0.025): t=21.895, p=0.0000 -> weighted better at 5% two-sided | worse: t=21.895, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Sortino  : n=1000 | better (higher is better; α_one-sided=0.025): t=20.413, p=0.0000 -> weighted better at 5% two-sided | worse: t=20.413, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Calmar   : n=1000 | better (higher is better; α_one-sided=0.025): t=16.206, p=0.0000 -> weighted better at 5% two-sided | worse: t=16.206, p=1.0000 -> no worse effect at 5%
+    weighted vs gps — Treynor  : n=1000 | better (higher is better; α_one-sided=0.025): t=-1.517, p=0.9353 -> no better effect at 5% | worse: t=-1.517, p=0.0647 -> no worse effect at 5%
+    weighted vs gps — MaxDD    : n=1000 | better (less severe (higher); α_one-sided=0.025): t=-77.394, p=1.0000 -> no better effect at 5% | worse: t=-77.394, p=0.0000 -> weighted worse at 5% two-sided
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Completed
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Total runtime: 01:53:47
+
