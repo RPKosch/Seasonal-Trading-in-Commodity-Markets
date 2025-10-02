@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 # =============================== #
 
 # Output toggles (like the DVR script)
-GENERATE_METRICS_CORR_CSV     = True
-GENERATE_METRICS_CORR_HEATMAP = True  # requires matplotlib
+GENERATE_METRICS_CORR_CSV     = False
+GENERATE_METRICS_CORR_HEATMAP = False  # requires matplotlib
 
 # Two-sided significance control: we test BOTH one-sided directions at α/2
 SIGNIF_TWO_SIDED_ALPHA = 0.05
@@ -59,7 +59,7 @@ GPS_SCORE_COMPONENTS = ["Seasonality", "TREYNOR", "ONE_MINUS_MDD"]
 ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
 
 # Monte Carlo params
-MC_RUNS                 = 1000
+MC_RUNS                 = 50
 LAMBDA_EWMA             = 0.94
 BACKCAST_N              = 12
 RNG_SEED                = 42
@@ -1135,35 +1135,84 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
             g_list = full_metrics[direction]['gps']
             arr = lambda attr, L: np.array([getattr(p, attr) for p in L], dtype=float)
 
-            def sig_pair_block(left_label, right_label, L_list, R_list, df_dir_metrics):
+            # --- ensure (1 - |MDD|) exists before significance tests ---
+            if df_metrics_all is not None and 'one_minus_mdd' not in df_metrics_all.columns and 'mdd_mag' in df_metrics_all.columns:
+                df_metrics_all['one_minus_mdd'] = 1.0 - df_metrics_all['mdd_mag']
+
+            def sig_pair_block(left_label, right_label, L_list, R_list, df_metrics_all_ref):
                 print(f"[ {left_label.upper()}  →  {right_label.upper()} ]")
-                for name, attr in [("Return", "cum_ret"),
-                                   ("CAGR", "cagr"),
-                                   ("Sharpe", "sharpe"),
-                                   ("Sortino", "sortino"),
-                                   ("Calmar", "calmar")]:
-                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(arr(attr, L_list), arr(attr, R_list))
-                    print_sig_line_generic(name, left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="higher is better")
-                # Adjusted Treynor from df_metrics_all by pair (vs long-only benchmark)
-                df_dir = df_metrics_all[df_metrics_all['direction'] == direction] if df_metrics_all is not None else pd.DataFrame()
-                t_g, p_g, t_l, p_l, n = paired_one_sided_both_from_df(df_dir, left_label.lower(), right_label.lower(), 'treynor_adj')
-                print_sig_line_generic("AdjTreynor", left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="higher is better")
-                # MaxDD: use -mdd so higher is better
-                t_g, p_g, t_l, p_l, n = paired_one_sided_both(-arr("mdd", L_list), -arr("mdd", R_list))
-                print_sig_line_generic("MaxDD", left_label, right_label, t_g, p_g, t_l, p_l, n, better_note="less severe (higher)")
+
+                # Port-only stats from Perf structs
+                for name, attr in [
+                    ("Return", "cum_ret"),
+                    ("CAGR", "cagr"),
+                    ("Sharpe", "sharpe"),
+                    ("Sortino", "sortino"),
+                    ("Calmar", "calmar"),
+                ]:
+                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(
+                        np.array([getattr(p, attr) for p in L_list], dtype=float),
+                        np.array([getattr(p, attr) for p in R_list], dtype=float)
+                    )
+                    print_sig_line_generic(name, left_label, right_label, t_g, p_g, t_l, p_l, n,
+                                           better_note="higher is better")
+
+                # Benchmark-relative metrics from df_metrics_all (handle short-vs-weighted by routing to long)
+                def _metric_by(strategy: str, direction_label: str, col: str) -> pd.DataFrame:
+                    sub = df_metrics_all_ref[
+                        (df_metrics_all_ref['strategy'] == strategy) &
+                        (df_metrics_all_ref['direction'] == direction_label)
+                        ]
+                    return sub[['run', col]].dropna().rename(columns={col: 'val'})
+
+                dir_L = direction
+                dir_R = 'long' if right_label.lower() == 'weighted' else direction
+
+                # Adjusted Treynor
+                L = _metric_by(left_label.lower(), dir_L, 'treynor_adj')
+                R = _metric_by(right_label.lower(), dir_R, 'treynor_adj')
+                merged = pd.merge(L, R, on='run', suffixes=('_L', '_R'))
+                if not merged.empty:
+                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
+                    print_sig_line_generic("AdjTreynor", left_label, right_label, t_g, p_g, t_l, p_l, n,
+                                           better_note="higher is better")
+                else:
+                    print_sig_line_generic("AdjTreynor", left_label, right_label, np.nan, np.nan, np.nan, np.nan, 0,
+                                           better_note="higher is better")
+
+                # MaxDD via (1 − |MDD|): higher = less severe drawdowns
+                L = _metric_by(left_label.lower(), dir_L, 'one_minus_mdd')
+                R = _metric_by(right_label.lower(), dir_R, 'one_minus_mdd')
+                merged = pd.merge(L, R, on='run', suffixes=('_L', '_R'))
+                if not merged.empty:
+                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
+                    print_sig_line_generic("MaxDD (1−|MDD|)", left_label, right_label, t_g, p_g, t_l, p_l, n,
+                                           better_note="less severe (higher)")
+                else:
+                    print_sig_line_generic("MaxDD (1−|MDD|)", left_label, right_label, np.nan, np.nan, np.nan, np.nan, 0,
+                                           better_note="less severe (higher)")
+
                 print("")
 
-            sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all[df_metrics_all['direction'] == direction] if df_metrics_all is not None else pd.DataFrame())
+            # ----- significance calls -----
+            b_list = full_metrics[direction]['baseline']
+            g_list = full_metrics[direction]['gps']
+            w_list = full_metrics['long']['weighted']  # benchmark lives on LONG side
 
-            # Long-only extra comparisons vs weighted
-            if direction == 'long':
-                w_list = full_metrics['long']['weighted']
-                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all[df_metrics_all['direction'] == 'long'])
-                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all[df_metrics_all['direction'] == 'long'])
+            # Baseline → GPS (current direction)
+            sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all)
 
+            # Versus benchmark
             if direction == 'long':
-                print(rule("─"))
-                print("")
+                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all)
+                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all)
+            else:  # direction == 'short'
+                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all)
+                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all)
+
+            # visual separator (optional)
+            print(rule("─"))
+            print("")
 
         total_elapsed = time.time() - t0
         section("Completed")
