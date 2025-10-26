@@ -43,14 +43,15 @@ GPS_CALIB_YEARS     = SIM_YEARS
 
 # GPS score metric selection (case-insensitive; aliases allowed)
 # You can include "Treynor" and it will use the adjusted Treynor (abs(beta)).
-GPS_SCORE_COMPONENTS = ["Seasonality", "TREYNOR", "ONE_MINUS_MDD"]  # e.g. ["Seasonality","Sharpe","Treynor"]
+# IMPORTANT: We now use raw MDD (more negative = worse). Higher MDD (less negative) is better.
+GPS_SCORE_COMPONENTS = ["Seasonality", "TREYNOR", "MDD"]
 
 # IO
 ROOT_DIR   = Path().resolve().parent.parent / "Complete Data"
-OUT_DIR_MC = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}_{len(GPS_SCORE_COMPONENTS)}_F"
+OUT_DIR_MC = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}_{len(GPS_SCORE_COMPONENTS)}_F2"
 
 # Monte Carlo
-MC_RUNS     = 50
+MC_RUNS     = 1000
 LAMBDA_EWMA = 0.94
 BACKCAST_N  = 12
 RNG_SEED    = 42
@@ -74,6 +75,35 @@ print(f"Apply   : {FINAL_SIM_START.date()} -> {FINAL_SIM_END.date()}")
 # =============================== #
 # 3) HELPERS
 # =============================== #
+def _fmt(x, nd=3):
+    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+        return ""
+    return f"{x:.{nd}f}"
+
+def _fmt_p(p, alpha=PER_SIDE_ALPHA):
+    if p is None or not np.isfinite(p):
+        return ""
+    star = "*" if p < alpha else ""
+    return f"{p:.4f}{star}"
+
+def _sig_conclusion(p_g, p_l, left_label, right_label, alpha=PER_SIDE_ALPHA):
+    """
+    Decide the directional conclusion at one-sided alpha:
+      - if p_g < alpha (right > left) and p_l >= alpha -> "right > left"
+      - if p_l < alpha (right < left) and p_g >= alpha -> "left > right"
+      - if both ns -> "ns"
+      - if both significant (rare/contradictory) -> "conflict"
+    """
+    g_sig = (p_g is not None and np.isfinite(p_g) and p_g < alpha)
+    l_sig = (p_l is not None and np.isfinite(p_l) and p_l < alpha)
+    if g_sig and not l_sig:
+        return f"{right_label} > {left_label}"
+    if l_sig and not g_sig:
+        return f"{left_label} > {right_label}"
+    if not g_sig and not l_sig:
+        return "ns"
+    return "conflict"
+
 def rule(ch="─", n=96) -> str:
     return ch * n
 
@@ -410,7 +440,7 @@ def max_drawdown_from_monthly(returns: pd.Series) -> float:
     cum = (1.0 + r.values).cumprod()
     peak = np.maximum.accumulate(cum)
     dd = cum / peak - 1.0
-    return float(dd.min())  # negative
+    return float(dd.min())  # negative (higher is better)
 
 def compute_gps_mapping_for_month(dt: pd.Timestamp,
                                   rankings: dict[pd.Timestamp, list[str]],
@@ -429,11 +459,12 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
       • Use the DVR z-score at dt for the ticker at prev-rank pr (built from lookback).
       • Flip sign for shorts.
 
-    Ratio metrics (Sharpe, Sortino, TreynorAdj, Information, Calmar, CumRet, MER_ann, One_minus_mdd):
+    Ratio metrics (Sharpe, Sortino, TreynorAdj, Information, Calmar, CumRet, MER_ann, MDD):
       • Computed on NET returns over a calibration window with NO look-ahead:
           rolling=True  -> [dt - calib_years .. dt - 1m]
           rolling=False -> [FINAL_SIM_START - calib_years .. FINAL_SIM_START - 1m]
       • IMPORTANT: All ratios vs the SAME long-only, net benchmark.
+      • For MDD (negative), higher is better (less severe drawdown).
     """
     if rolling:
         dt_minus  = dt - relativedelta(years=calib_years)
@@ -500,10 +531,10 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
             cal    = calmar_ratio(list(port.values))
             cum    = float(np.prod(1.0 + port.values) - 1.0) if len(port) else np.nan
             mer_a  = 12.0 * mean_excess_return_series(port, bench_win)
-            mdd_m  = abs(max_drawdown_from_monthly(port))
-            one_m  = 1.0 - mdd_m if np.isfinite(mdd_m) else np.nan
+            mdd    = max_drawdown_from_monthly(port)  # negative; higher is better
+            mdd_m  = abs(mdd) if np.isfinite(mdd) else np.nan
         else:
-            sr = sor = trey_r = trey_a = info = cal = cum = mer_a = mdd_m = one_m = np.nan
+            sr = sor = trey_r = trey_a = info = cal = cum = mer_a = mdd = mdd_m = np.nan
 
         rows.append({
             'prev_rank': pr,
@@ -516,8 +547,8 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
             'calmar': cal,
             'cum_ret': cum,
             'mer_ann': mer_a,
-            'mdd_mag': mdd_m,
-            'one_minus_mdd': one_m,
+            'mdd': mdd,        # NEW: raw MDD (negative; higher is better)
+            'mdd_mag': mdd_m,  # magnitude if you still want it elsewhere
         })
 
     mdf = pd.DataFrame(rows).set_index('prev_rank').sort_index()
@@ -531,8 +562,8 @@ def compute_gps_mapping_for_month(dt: pd.Timestamp,
         'CALMAR': 'calmar',
         'INFORMATION': 'information',
         'MER_ANN': 'mer_ann',
-        'ONE_MINUS_MDD': 'one_minus_mdd',
         'CUM_RET': 'cum_ret',
+        'MDD': 'mdd',  # NEW: map MDD to raw mdd (higher is better since less negative)
 
         # Treynor aliases:
         'TREYNOR': 'treynor_adj',            # default to adjusted Treynor
@@ -661,7 +692,7 @@ class Perf:
     sharpe: float
     sortino: float
     calmar: float
-    mdd: float     # negative by construction
+    mdd: float     # negative by construction (higher is better)
     stdev: float   # monthly stdev
 
 def perf_from_monthly(returns: pd.Series) -> Perf:
@@ -677,7 +708,7 @@ def perf_from_monthly(returns: pd.Series) -> Perf:
     cum_curve = np.cumprod(1.0 + arr)
     peak = np.maximum.accumulate(cum_curve)
     dd = cum_curve / peak - 1.0
-    mdd = float(np.min(dd)) if dd.size else np.nan
+    mdd = float(np.min(dd)) if dd.size else np.nan  # negative
     sd  = float(np.std(arr, ddof=1)) if arr.size >= 2 else np.nan
     return Perf(cum, cagr, sr, sor, cal, mdd, sd)
 
@@ -878,7 +909,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                     'treynor_raw': treynor_ratio_series(top1_baseline, bench_apply_long_net),
                     'information': information_ratio_series(top1_baseline, bench_apply_long_net),
                     'calmar': pb.calmar, 'cum_ret': pb.cum_ret,
-                    'mdd_raw': pb.mdd if np.isfinite(pb.mdd) else np.nan,
+                    'mdd_raw': pb.mdd if np.isfinite(pb.mdd) else np.nan,   # keep raw MDD (negative)
                     'mdd_mag': abs(pb.mdd) if np.isfinite(pb.mdd) else np.nan,
                     'mer_m': mean_excess_return_series(top1_baseline, bench_apply_long_net),
                 })
@@ -1020,8 +1051,8 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                 tg_arr = np.array(sub_treynor_adj[direction]['gps'][i], dtype=float)
                 tb_mean = safe_mean(tb_arr); tg_mean = safe_mean(tg_arr)
                 print(f"\n  Window {i}: {s.date()} → {e.date()}")
-                print(f"    {'Metric':<14} {'Baseline':>12} {'GPS':>12}" + ("" if direction=='short' else " {'Weighted':>12}"))
-                print(f"    {'-'*14:<14} {'-'*12:>12} {'-'*12:>12}" + ("" if direction=='short' else " {'-'*12:>12}"))
+                print(f"    {'Metric':<14} {'Baseline':>12} {'GPS':>12}" + ("" if direction=='short' else f" {'Weighted':>12}"))
+                print(f"    {'-'*14:<14} {'-'*12:>12} {'-'*12:>12}" + ("" if direction=='short' else f" {'-'*12:>12}"))
                 def line2(label, f, g, fmt=".4f"):
                     def fmt1(x): return ("{:"+fmt+"}").format(float(x)) if np.isfinite(x) else "nan"
                     print(f"    {label:<14} {fmt1(f):>12} {fmt1(g):>12}")
@@ -1035,7 +1066,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                     line2("Sharpe mean",  ab['sharpe_mean'],   ag['sharpe_mean'], fmt=".3f")
                     line2("Calmar mean",  ab['calmar_mean'],   ag['calmar_mean'], fmt=".3f")
                     line2("MaxDD mean",   ab['mdd_mean'],      ag['mdd_mean'],    fmt=".3f")
-                    print(f"    {'AdjTreynor mean':<14} {tb_mean:>12.3f} {tg_mean:>12.3f}")
+                    print(f"    {'AdjTreynor mean':<12} {tb_mean:>11.3f} {tg_mean:>12.3f}")
                 else:
                     aw = agg(sub_metrics['long']['weighted'][i])
                     tw_arr = np.array(sub_treynor_adj['long']['weighted'][i], dtype=float)
@@ -1045,7 +1076,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                     line3("Sharpe mean",  ab['sharpe_mean'],   ag['sharpe_mean'],   aw['sharpe_mean'], fmt=".3f")
                     line3("Calmar mean",  ab['calmar_mean'],   ag['calmar_mean'],   aw['calmar_mean'], fmt=".3f")
                     line3("MaxDD mean",   ab['mdd_mean'],      ag['mdd_mean'],      aw['mdd_mean'],    fmt=".3f")
-                    print(f"    {'AdjTreynor mean':<14} {tb_mean:>12.3f} {tg_mean:>12.3f} {tw_mean:>12.3f}")
+                    print(f"    {'AdjTreynor mean':<12} {tb_mean:>11.3f} {tg_mean:>12.3f} {tw_mean:>12.3f}")
 
             section("Significance — Paired, one-sided (per-side α = {:.3f}; overall two-sided 5%)".format(PER_SIDE_ALPHA))
 
@@ -1054,11 +1085,30 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
             g_list = full_metrics[direction]['gps']
             arr = lambda attr, L: np.array([getattr(p, attr) for p in L], dtype=float)
 
-            def sig_pair_block(left_label, right_label, L_list, R_list, df_dir_metrics):
-                print(f"[ {left_label.upper()}  →  {right_label.upper()} ]")
+            def sig_pair_block(left_label, right_label, L_list, R_list, df_dir_metrics, direction_label: str):
+                """
+                Builds a compact significance table for:
+                  Return, CAGR, Sharpe, Sortino, Calmar, AdjTreynor (abs beta), MaxDD (raw; higher=better).
+                Prints a single aligned table with per-metric n, t/p for both one-sided directions, and a Conclusion.
+                """
+                print(f"[ {left_label.upper()}  →  {right_label.upper()} ]  (α_one-sided={PER_SIDE_ALPHA:.3f})")
 
-                # Port-only stats (same Perf structs you already built)
-                for name, attr in [
+                # --- Port-only stats (arrays you passed already encode long/short) ---
+                arr = lambda attr, L: np.array([getattr(p, attr) for p in L], dtype=float)
+
+                rows = []
+
+                def add_row(metric_name, t_g, p_g, t_l, p_l, n):
+                    rows.append({
+                        "Metric": metric_name,
+                        "n": ("" if n is None else f"{n:d}"),
+                        "t(>)": _fmt(t_g), "p(>)": _fmt_p(p_g),
+                        "t(<)": _fmt(t_l), "p(<)": _fmt_p(p_l),
+                        "Conclusion": _sig_conclusion(p_g, p_l, left_label, right_label)
+                    })
+
+                # 1) Port-only metrics
+                for mname, attr in [
                     ("Return", "cum_ret"),
                     ("CAGR", "cagr"),
                     ("Sharpe", "sharpe"),
@@ -1066,58 +1116,65 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                     ("Calmar", "calmar"),
                 ]:
                     t_g, p_g, t_l, p_l, n = paired_one_sided_both(arr(attr, L_list), arr(attr, R_list))
-                    print_sig_line_generic(name, left_label, right_label, t_g, p_g, t_l, p_l, n,
-                                           better_note="higher is better")
+                    add_row(mname, t_g, p_g, t_l, p_l, n)
 
-                # ---- Benchmark-relative metrics pulled from df_metrics_all ----
-                # Helper: extract per-run values for a given strategy/direction/column
-                def _metric_by(strategy: str, direction_label: str, col: str) -> pd.DataFrame:
-                    sub = df_metrics_all[
-                        (df_metrics_all['strategy'] == strategy) &
-                        (df_metrics_all['direction'] == direction_label)
-                        ]
+                # 2) Benchmark-relative metrics from the metrics DataFrame you pass in
+                base = df_dir_metrics if df_dir_metrics is not None else df_metrics_all
+
+                def _metric_by(strategy: str, direction_lbl: str, col: str) -> pd.DataFrame:
+                    sub = base[(base['strategy'] == strategy) & (base['direction'] == direction_lbl)]
+                    if sub.empty or (col not in sub.columns):
+                        return pd.DataFrame(columns=['run', 'val'])
                     return sub[['run', col]].dropna().rename(columns={col: 'val'})
 
-                # Which direction to use for each side in Treynor & 1−|MDD|
-                dir_L = direction
-                dir_R = 'long' if right_label.lower() == 'weighted' else direction
+                # Use explicit directions: left side = current loop direction;
+                # right side = 'long' only when comparing against the weighted benchmark.
+                dir_L = direction_label
+                dir_R = 'long' if right_label.lower() == 'weighted' else direction_label
 
-                # Adjusted Treynor (annualized, uses |beta|)
+                # Adjusted Treynor (abs beta)
                 L = _metric_by(left_label.lower(), dir_L, 'treynor_adj')
                 R = _metric_by(right_label.lower(), dir_R, 'treynor_adj')
-                merged = pd.merge(L, R, on='run', suffixes=('_L', '_R'))
-                if not merged.empty:
-                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
-                    print_sig_line_generic("AdjTreynor", left_label, right_label, t_g, p_g, t_l, p_l, n,
-                                           better_note="higher is better")
+                if not L.empty and not R.empty:
+                    merged = pd.merge(L, R, on='run', suffixes=('_L', '_R')).dropna()
+                    if not merged.empty:
+                        t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
+                        add_row("AdjTreynor", t_g, p_g, t_l, p_l, n)
+                    else:
+                        add_row("AdjTreynor", None, None, None, None, 0)
                 else:
-                    print_sig_line_generic("AdjTreynor", left_label, right_label, np.nan, np.nan, np.nan, np.nan, 0,
-                                           better_note="higher is better")
+                    add_row("AdjTreynor", None, None, None, None, 0)
 
-                # MaxDD via (1 − |MDD|): higher = less severe drawdowns (consistent with GPS)
-                L = _metric_by(left_label.lower(), dir_L, 'one_minus_mdd')
-                R = _metric_by(right_label.lower(), dir_R, 'one_minus_mdd')
-                merged = pd.merge(L, R, on='run', suffixes=('_L', '_R'))
-                if not merged.empty:
-                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
-                    print_sig_line_generic("MaxDD (1−|MDD|)", left_label, right_label, t_g, p_g, t_l, p_l, n,
-                                           better_note="less severe (higher)")
+                # MaxDD (raw, higher is better i.e., less severe)
+                L = _metric_by(left_label.lower(), dir_L, 'mdd_raw')
+                R = _metric_by(right_label.lower(), dir_R, 'mdd_raw')
+                if not L.empty and not R.empty:
+                    merged = pd.merge(L, R, on='run', suffixes=('_L', '_R')).dropna()
+                    if not merged.empty:
+                        t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
+                        add_row("MaxDD (raw)", t_g, p_g, t_l, p_l, n)
+                    else:
+                        add_row("MaxDD (raw)", None, None, None, None, 0)
                 else:
-                    print_sig_line_generic("MaxDD (1−|MDD|)", left_label, right_label, np.nan, np.nan, np.nan, np.nan,
-                                           0, better_note="less severe (higher)")
+                    add_row("MaxDD (raw)", None, None, None, None, 0)
 
-                print("")
+                # --- Render once as a clean table ---
+                df_out = pd.DataFrame(rows, columns=["Metric", "n", "t(>)", "p(>)", "t(<)", "p(<)", "Conclusion"])
+                print(df_to_string_centered(df_out, index=False))
+                print("")  # spacer
 
             # Long-only extra comparisons vs weighted
             if direction == 'long':
                 w_list = full_metrics['long']['weighted']
-                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all[df_metrics_all['direction'] == 'long'])
-                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all[df_metrics_all['direction'] == 'long'])
+                sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all, 'long')
+                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all, 'long')
+                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all, 'long')
 
             if direction == 'short':
-                w_list = full_metrics['long']['weighted']  # use the long equal-weight benchmark
-                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all)
-                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all)
+                w_list = full_metrics['long']['weighted']  # benchmark lives on LONG
+                sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all, 'short')
+                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all, 'short')
+                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all, 'short')
 
             print(rule("─"))
             print("")
@@ -1129,13 +1186,13 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
         # === Save metrics table + correlations ===
         if metrics_rows:
             df_metrics = pd.DataFrame(metrics_rows)
-            df_metrics['one_minus_mdd'] = 1.0 - df_metrics['mdd_mag']
+            # Keep mer_ann for convenience
             df_metrics['mer_ann'] = 12.0 * df_metrics['mer_m']
             df_metrics.to_csv(OUT_DIR_MC / "performance_metrics_by_portfolio.csv", index=False)
 
             # ---- ADD THIS: Sharpe vs CumRet sanity by direction (and by strategy) ----
             metric_cols = ["sharpe", "sortino", "treynor_adj", "information",
-                           "calmar", "cum_ret", "one_minus_mdd", "mer_ann"]
+                           "calmar", "cum_ret", "mdd_raw", "mer_ann"]
 
             # Per-direction Sharpe <-> CumRet
             for d in ["long", "short"]:
@@ -1148,7 +1205,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                         # Optional: save per-direction correlation matrix
                         corr.to_csv(OUT_DIR_MC / f"metrics_correlation_matrix_{d}.csv")
 
-            # Per-direction & per-strategy (baseline/gps/weighted) — helpful to see mixing effects
+            # Per-direction & per-strategy (baseline/gps/weighted)
             for d in ["long", "short"]:
                 strategies = ["baseline", "gps", "weighted"] if d == "long" else ["baseline", "gps"]
                 for s in strategies:
@@ -1158,13 +1215,12 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
                         if "sharpe" in corr.index and "cum_ret" in corr.columns:
                             val = corr.loc["sharpe", "cum_ret"]
                             print(f"[Sanity] Sharpe↔CumRet (direction={d}, strategy={s}): {val:.3f}")
-                            # Optional: save per-direction/strategy correlation matrix
                             corr.to_csv(OUT_DIR_MC / f"metrics_correlation_matrix_{d}_{s}.csv")
             # ---- END ADD ----
 
-            # Use adjusted Treynor in the correlation matrix (higher-is-better across directions)
+            # Use adjusted Treynor in the correlation matrix; include raw MDD
             metric_cols = ["sharpe","sortino","treynor_adj","information",
-                           "calmar","cum_ret","one_minus_mdd","mer_ann"]
+                           "calmar","cum_ret","mdd_raw","mer_ann"]
             if GENERATE_METRICS_CORR_CSV or GENERATE_METRICS_CORR_HEATMAP:
                 corr = compute_metrics_correlation(df_metrics, metric_cols)
                 if GENERATE_METRICS_CORR_CSV:
