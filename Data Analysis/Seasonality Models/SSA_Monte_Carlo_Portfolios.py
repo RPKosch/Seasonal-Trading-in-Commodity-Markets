@@ -38,6 +38,7 @@ START_VALUE             = 1000.0
 ENTRY_COST              = 0.0025                 # apply ONCE per month
 
 # ===== SSA params (replaces DVR) =====
+SSA_WINDOW              = 36                     # Theory suggests N/3 with inclusion of main cycle which is yearly
 SSA_WINDOW              = 12                     # embedding dimension L
 SSA_COMPS               = 2                      # rank r (number of components)
 SSA_USE_EWMA_SCALE      = True                   # if True, scale score by EWMA sigma of simple returns

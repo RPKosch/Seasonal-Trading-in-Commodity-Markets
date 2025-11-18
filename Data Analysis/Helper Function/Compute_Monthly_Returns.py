@@ -18,10 +18,6 @@ LOST_TICKERS = ["PA", "PL"]
 TICKERS         = ["CC", "CF", "CO", "CP", "CT", "ZW", "GD", "HE", "HO",
                    "LE", "NG", "ZS", "SU", "SV", "ZC"]
 
-TICKERS         = ["CC","CF","CO","CP","GD","LE","NG","ZS","SU","ZC","GF","ZL","ZM","ZO","ZR"]
-
-TICKERS         = ["ZL", "ZM"]
-
 #Drop: HO (dup. with crude), SV (dup. with gold), HE (livestock overlap), CT (free a softs slot), ZW (to offset heavier soy complex)
 
 START_YEAR      = 2001

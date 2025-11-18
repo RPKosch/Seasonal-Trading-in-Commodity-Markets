@@ -545,7 +545,7 @@ def main():
     args = parser.parse_args()
 
     project_root = Path().resolve().parent.parent
-    data_root = project_root / "Complete Data" / "All_Monthly_Log_Return_Data"
+    data_root = project_root / "Complete Data" / "All_Monthly_Return_Data"
     reports_root = Path().resolve() / "Reports"
 
     #logfile = init_logger(reports_root)

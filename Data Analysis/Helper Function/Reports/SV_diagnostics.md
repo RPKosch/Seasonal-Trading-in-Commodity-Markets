@@ -11,35 +11,35 @@
 ## Exploratory Analysis
 
 **Summary of monthly returns**
- count     mean      std      skew  kurtosis_excess       min       q25    median      q75      max
-   292 0.003329 0.087151 -0.110296         0.885415 -0.323058 -0.051699 -0.002185 0.059542 0.266458
+ count     mean      std     skew  kurtosis_excess       min       q25    median     q75      max
+   292 0.007129 0.087671 0.248574         0.753476 -0.276068 -0.050385 -0.002182 0.06135 0.305332
 
 
 **Month vs. Rest-of-Year (Welch two-sample t-tests)**
 
  month  n(m)  n(rest)   mean(m)  mean(rest)  mean(m) − mean(rest)    t_stat  p_value sig
-01-Jan    25      267  0.026835    0.001128              0.025707  1.810518 0.079377   *
-02-Feb    25      267  0.009098    0.002789              0.006310  0.368555 0.715091    
-03-Mar    25      267  0.006152    0.003064              0.003087  0.172182 0.864494    
-04-Apr    25      267 -0.001818    0.003811             -0.005629 -0.265454 0.792660    
-05-May    24      268  0.000015    0.003626             -0.003611 -0.167218 0.868494    
-06-Jun    24      268 -0.032997    0.006582             -0.039579 -2.528636 0.017051  **
-07-Jul    24      268  0.030228    0.000920              0.029308  1.811561 0.080421   *
-08-Aug    24      268 -0.000901    0.003708             -0.004608 -0.222130 0.825931    
-09-Sep    24      268 -0.018527    0.005286             -0.023813 -1.005683 0.324075    
-10-Oct    24      268  0.005349    0.003148              0.002201  0.134318 0.894083    
-11-Nov    24      268  0.006344    0.003059              0.003285  0.198936 0.843712    
-12-Dec    24      268  0.009044    0.002817              0.006227  0.341559 0.735279    
+01-Jan    25      267  0.029335    0.005049              0.024285  1.654377 0.107761    
+02-Feb    25      267  0.012368    0.006638              0.005730  0.327347 0.745734    
+03-Mar    25      267  0.009733    0.006885              0.002848  0.155999 0.877124    
+04-Apr    25      267  0.003284    0.007489             -0.004205 -0.194978 0.846863    
+05-May    24      268  0.005135    0.007307             -0.002173 -0.098152 0.922570    
+06-Jun    24      268 -0.030012    0.010455             -0.040466 -2.596771 0.014503  **
+07-Jul    24      268  0.033552    0.004762              0.028790  1.646020 0.110934    
+08-Aug    24      268  0.003665    0.007439             -0.003774 -0.184695 0.854877    
+09-Sep    24      268 -0.012475    0.008884             -0.021359 -0.946968 0.352479    
+10-Oct    24      268  0.008075    0.007044              0.001031  0.064167 0.949273    
+11-Nov    24      268  0.009212    0.006942              0.002270  0.134735 0.893766    
+12-Dec    24      268  0.012580    0.006640              0.005939  0.326589 0.746443    
 
 _Interpretation:_ For each row, we test whether the average return in that month differs from the average return in all the other months. Small p-values (e.g., < 0.05) indicate the month’s average return is significantly different from the rest of the year.
 
 
 ## Stationarity
 
-- **ADF**: stat = -18.021, p = 0.0000 ***, lags used = 0, n = 291  
+- **ADF**: stat = -17.918, p = 0.0000 ***, lags used = 0, n = 291  
   critical values: 1%=-3.453, 5%=-2.872, 10%=-2.572
 
-- **KPSS (level)**: stat = 0.114, p = 0.1000 , lags used = 6  
+- **KPSS (level)**: stat = 0.124, p = 0.1000 , lags used = 6  
   critical values: 10%=0.347, 5%=0.463, 2.5%=0.574, 1%=0.739
 
 - **Joint read**: ADF rejects & KPSS does not reject → returns look stationary.
@@ -47,11 +47,11 @@ _Interpretation:_ For each row, we test whether the average return in that month
 
 ## Homoskedasticity (constant error variance)
 
-- **Breusch–Pagan**: LM p = 0.3885, F p = 0.3938  
-- **White**: LM p = 0.3885, F p = 0.3938
+- **Breusch–Pagan**: LM p = 0.5416, F p = 0.5496  
+- **White**: LM p = 0.5416, F p = 0.5496
   *Interpretation:* **small p-values (<0.05)** suggest **heteroskedasticity conditional on the regressors** (here: month dummies).
 
-- **ARCH LM (lags=12)**: LM p = 0.0017, F p = 0.0012  
+- **ARCH LM (lags=12)**: LM p = 0.0011, F p = 0.0007  
   *Interpretation:* **small p-values (<0.05)** indicate **conditional heteroskedasticity** (volatility clustering) in residuals.
 
 **Conclusion:** Evidence of **heteroskedasticity**. Report **robust standard errors** (HC3; and **HAC/Newey–West** if serial correlation is present).
@@ -59,11 +59,11 @@ _Interpretation:_ For each row, we test whether the average return in that month
 
 ## Structural Breaks
 
-- **CUSUM (parameter stability test)**: p = 0.2776. CUSUM tracks cumulative sums of recursive residuals; **small p-values (< 0.05)** indicate **time-varying coefficients** (instability) rather than constant effects over the sample.
+- **CUSUM (parameter stability test)**: p = 0.2504. CUSUM tracks cumulative sums of recursive residuals; **small p-values (< 0.05)** indicate **time-varying coefficients** (instability) rather than constant effects over the sample.
 
   **Interpretation:** No evidence against stability — parameters appear stable.
 
-- **Chow (rolling break search)**: F = 1.71, p = 0.0635, break at index 123 (2011-04-01), left n = 123, right n = 169
+- **Chow (rolling break search)**: F = 1.70, p = 0.0670, break at index 124 (2011-05-01), left n = 124, right n = 168
 
   *What it does:* For each admissible split point, the test compares a **single-regime fit** to a **two-regime fit** (pre-break vs post-break). **Small p-values (< 0.05)** indicate a **structural break** at (or near) the reported split.
 
@@ -74,27 +74,27 @@ _Interpretation:_ For each row, we test whether the average return in that month
 
 **Regression influence (top 10 by Cook’s D)**
       date  year  month    return  stud_resid  leverage  cooks_d  flag_studentized>|3|  flag_leverage>2k/n  flag_cooks>4/n
-2011-09-01  2011      9 -0.323058   -3.641860  0.041667 0.046039                  True               False            True
-2008-08-01  2008      8 -0.267453   -3.170101  0.041667 0.035271                  True               False            True
-2011-04-01  2011      4  0.266458    3.188478  0.040000 0.034181                  True               False            True
-2004-04-01  2004      4 -0.265895   -3.136797  0.040000 0.033119                  True               False            True
-2020-07-01  2020      7  0.264928    2.780056  0.041667 0.027345                 False               False            True
-2009-05-01  2009      5  0.232638    2.754782  0.041667 0.026864                 False               False            True
-2011-05-01  2011      5 -0.227494   -2.692627  0.041667 0.025695                 False               False            True
-2008-10-01  2008     10 -0.220880   -2.677089  0.041667 0.025407                 False               False            True
-2020-05-01  2020      5  0.204679    2.416276  0.041667 0.020794                 False               False            True
-2016-06-01  2016      6  0.147754    2.129067  0.041667 0.016219                 False               False            True
+2011-04-01  2011      4  0.305332    3.580899  0.040000 0.042720                  True               False            True
+2020-07-01  2020      7  0.303337    3.186502  0.041667 0.035624                  True               False            True
+2011-09-01  2011      9 -0.276068   -3.110802  0.041667 0.034008                  True               False            True
+2009-05-01  2009      5  0.261924    3.027837  0.041667 0.032275                  True               False            True
+2008-08-01  2008      8 -0.234673   -2.803903  0.041667 0.027804                 False               False            True
+2004-04-01  2004      4 -0.233480   -2.782379  0.040000 0.026249                 False               False            True
+2020-05-01  2020      5  0.227131    2.606791  0.041667 0.024122                 False               False            True
+2011-05-01  2011      5 -0.203473   -2.446087  0.041667 0.021300                 False               False            True
+2008-10-01  2008     10 -0.198187   -2.418005  0.041667 0.020823                 False               False            True
+2016-06-01  2016      6  0.159228    2.214787  0.041667 0.017528                 False               False            True
 
 
 **Univariate return outliers (MAD-z)**
       date  year  month    return     MAD_z  flag_|MADz|>3.5
-2011-09-01  2011      9 -0.323058 -3.904488             True
-2011-04-01  2011      4  0.266458  3.268935            False
-2020-07-01  2020      7  0.264928  3.250319            False
-2008-08-01  2008      8 -0.267453 -3.227866            False
-2004-04-01  2004      4 -0.265895 -3.208910            False
-2009-05-01  2009      5  0.232638  2.857399            False
-2011-05-01  2011      5 -0.227494 -2.741635            False
-2008-10-01  2008     10 -0.220880 -2.661155            False
-2020-05-01  2020      5  0.204679  2.517189            False
-2020-09-01  2020      9 -0.190700 -2.293914            False
+2011-04-01  2011      4  0.305332  3.723136             True
+2020-07-01  2020      7  0.303337  3.698976             True
+2011-09-01  2011      9 -0.276068 -3.315978            False
+2009-05-01  2009      5  0.261924  3.197583            False
+2008-08-01  2008      8 -0.234673 -2.814807            False
+2004-04-01  2004      4 -0.233480 -2.800361            False
+2020-05-01  2020      5  0.227131  2.776338            False
+2011-02-01  2011      2  0.204630  2.503920            False
+2011-05-01  2011      5 -0.203473 -2.437055            False
+2008-10-01  2008     10 -0.198187 -2.373061            False
