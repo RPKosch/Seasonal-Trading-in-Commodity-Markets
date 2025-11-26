@@ -1,4 +1,7 @@
-import io, sys, time
+import time
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -8,84 +11,193 @@ from decimal import Decimal
 from collections import defaultdict
 from dataclasses import dataclass
 from scipy import stats as st
+import sys, io
 from contextlib import redirect_stdout
+import warnings
 
 # =============================== #
-# 0) GLOBAL SWITCHES / SIGNIFICANCE
+# 0) GLOBAL SWITCHES & NUMPY/WARNING SETTINGS
 # =============================== #
-# Two-sided significance control implemented as BOTH one-sided tests at α/2
-SIGNIF_TWO_SIDED_ALPHA = 0.05
-PER_SIDE_ALPHA         = SIGNIF_TWO_SIDED_ALPHA / 2.0  # 0.025
+GENERATE_METRICS_CORR_CSV = False
+GENERATE_METRICS_CORR_HEATMAP = False # requires matplotlib
+
+SIGNIF_TWO_SIDED_ALPHA = 0.01
 
 # =============================== #
 # 1) PARAMETERS & WINDOWS
 # =============================== #
-START_DATE              = datetime(2001, 1, 1)
-FINAL_END               = datetime(2024, 12, 31)
+START_DATE = datetime(2001, 1, 1)
+FINAL_END = datetime(2024, 12, 31)
 
-LOOKBACK_YEARS          = 10                     # RLSSA lookback window
-SIM_YEARS               = 5                      # test window (2011-2015 given START_DATE)
-# Apply window is 2016-01 -> 2024-12 given the above
+LOOKBACK_YEARS = 10  # Rolling lookback for RLSSA
 
-START_VALUE             = 1000.0
-ENTRY_COST              = 0.0025                 # apply ONCE per month
+# Portfolio & costs
+START_VALUE = 1000.0
+TRADING_COST = 0.00086  # per side (buy OR sell)
+#TRADING_COST = 0        # set to zero to ignore costs
 
-# RLSSA params
-SSA_WINDOW              = 12                     # embedding dimension L
-SSA_COMPS               = 2                      # robust rank q (components)
-RLSSA_USE_EWMA_SCALE    = True                   # if True, scale score by EWMA sigma of simple rets
-RLSSA_EWMA_LAMBDA       = 0.94                   # alpha = 1 - lambda
-MIN_OBS_FOR_VOL         = 12
+# RLSSA structural parameters
+RLSSA_L = 36  # embedding window length (months)
+RLSSA_R = 12  # signal rank (number of eigentriples)
 
-# GPS switches
-GPS_ROLLING_ENABLED     = True                   # True=rolling 5y monthly re-calibration; False=fixed pre-apply
-GPS_CALIB_YEARS         = SIM_YEARS
+# RLSSA speed / convergence knobs (iterations / truncation only, math unchanged)
+RLSSA_MAX_ITERS = 30          # max inner iterations in robust_svd
+RLSSA_TOL = 1e-5              # convergence tolerance
+RLSSA_MAX_WORKERS = max(1, (os.cpu_count() or 1))  # parallel workers for RLSSA
 
-# === GPS score metric selection (case-insensitive; aliases allowed) =========
-# Choose any subset of:
-#   "Seasonality", "Sharpe"/"Sharp", "Treynor" (Adj), "Calmar",
-#   "Information", "Mer_ann", "MDD_RAW", "Cum_ret", "Sortino"
-# NOTE: "Treynor" maps to adjusted Treynor by default (abs(beta)).
-GPS_SCORE_COMPONENTS = ["Seasonality", "TREYNOR", "MDD"]
+# Risk-normalisation / EWMA
+EWMA_LAMBDA = 0.97
 
-# Contract/IO (only monthly files used here)
-ROOT_DIR                = Path().resolve().parent.parent / "Complete Data"
+# IO
+ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
+OUT_DIR_MC = Path().resolve() / "Outputs_MC" / "RLSSA_MC_classic_vs_risk_done"
 
-# Monte Carlo params
-MC_RUNS                 = 1000
-LAMBDA_EWMA             = 0.94                   # for EWMA-projected sigma used in noise injection
-BACKCAST_N              = 12
-RNG_SEED                = 42
-SAVE_SERIES             = False                  # save Top-1 monthly series per run
-OUT_DIR_MC              = Path().resolve() / "Outputs_MC" / f"RLSSA_MC_{'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'}_{len(GPS_SCORE_COMPONENTS)}_F2"
-
-# NEW switches
-SAVE_TICKER_CHOICES_CSV = True                   # write Top-5 selection-share tables per direction
-ZERO_NOISE              = False                  # if True, set z_t = 0 (no randomness)
+# Monte Carlo (MEB)
+MC_RUNS = 100
+RNG_SEED = 42
+MEB_TRIM = 0.1
+SAVE_SERIES = False
+SAVE_TICKER_CHOICES_CSV = True
+ZERO_NOISE = False  # True => use original historical path (no MEB bootstrap)
 
 # =============================== #
 # 2) DATE RANGES
 # =============================== #
-LOOKBACK_END    = (START_DATE + relativedelta(years=LOOKBACK_YEARS) - pd.offsets.MonthEnd(1))
-TEST_SIM_START  = START_DATE + relativedelta(years=LOOKBACK_YEARS)                             # 2011-01
-TEST_SIM_END    = TEST_SIM_START + relativedelta(years=SIM_YEARS) - pd.offsets.MonthEnd(1)     # 2015-12
-FINAL_SIM_START = START_DATE + relativedelta(years=LOOKBACK_YEARS + SIM_YEARS)                 # 2016-01
-FINAL_SIM_END   = FINAL_END                                                                     # 2024-12
-
-print(f"Lookback: {START_DATE.date()} -> {LOOKBACK_END.date()}")
-print(f"Testing : {TEST_SIM_START.date()} -> {TEST_SIM_END.date()}")
+FINAL_SIM_START = datetime(2016, 1, 1)
+FINAL_SIM_END = FINAL_END
 print(f"Apply   : {FINAL_SIM_START.date()} -> {FINAL_SIM_END.date()}")
 
 # =============================== #
 # 3) HELPERS
 # =============================== #
+np.seterr(divide='ignore', invalid='ignore')
+warnings.filterwarnings(
+    "ignore",
+    message="Degrees of freedom <= 0 for slice",
+    category=RuntimeWarning
+)
+warnings.filterwarnings(
+    "ignore",
+    message="invalid value encountered in scalar divide",
+    category=RuntimeWarning
+)
+
+
+def _fmt(x, nd=3):
+    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+        return ""
+    return f"{x:.{nd}f}"
+
+
+def _fmt_p(p, alpha=SIGNIF_TWO_SIDED_ALPHA):
+    if p is None or not np.isfinite(p):
+        return ""
+    star = "*" if p < alpha else ""
+    return f"{p:.4f}{star}"
+
+
+def _sig_conclusion(t, p, left_label, right_label, alpha=SIGNIF_TWO_SIDED_ALPHA):
+    if (t is None) or (p is None) or (not np.isfinite(t)) or (not np.isfinite(p)) or p >= alpha:
+        return "ns"
+    return f"{right_label} > {left_label}" if t > 0 else f"{left_label} > {right_label}"
+
+
 def rule(ch="─", n=96) -> str:
     return ch * n
+
 
 def section(title: str, ch="═", n=96):
     print("\n" + rule(ch, n))
     print(title)
     print(rule(ch, n) + "\n")
+
+
+def build_equal_weight_benchmark(simple_rets_dict: dict[str, pd.Series],
+                                 start_dt: pd.Timestamp,
+                                 end_dt: pd.Timestamp) -> pd.Series:
+    """
+    Passive monthly benchmark (gross, long): equally-weighted average across all tickers' simple returns
+    available in a given month. Index is the month grid [start_dt..end_dt].
+    """
+    idx = pd.date_range(start_dt, end_dt, freq='MS')
+    df = pd.DataFrame({t: s.reindex(idx) for t, s in simple_rets_dict.items()})
+    return df.mean(axis=1, skipna=True).rename("benchmark")
+
+
+def apply_roundtrip_cost(simple_ret: float | np.ndarray, side_cost: float) -> float | np.ndarray:
+    """
+    Apply one full roundtrip trading cost (buy + sell) to a simple monthly return.
+
+    side_cost is PER SIDE (e.g. 0.0025 = 0.25% on buy, 0.25% on sell).
+
+    For scalar or array-like:
+        net = (1 - side_cost)^2 * (1 + simple_ret) - 1
+    """
+    return (1.0 - side_cost) ** 2 * (1.0 + simple_ret) - 1.0
+
+
+def long_benchmark_net(bench_gross_long: pd.Series, entry_cost: float) -> pd.Series:
+    """
+    Convert a gross, LONG benchmark to NET-of-cost using one full monthly roundtrip:
+        r_net = (1 - entry_cost)^2 * (1 + r) - 1
+    where entry_cost is PER SIDE (buy OR sell).
+    """
+    b = bench_gross_long.astype(float)
+    b = apply_roundtrip_cost(b, entry_cost)
+    return b.rename(f"{bench_gross_long.name or 'benchmark'}_long_net")
+
+
+def compute_beta(port: pd.Series, bench: pd.Series) -> float:
+    a = pd.concat([bench, port], axis=1, join="inner").dropna()
+    if a.shape[0] < 3:
+        return np.nan
+    m = a.iloc[:, 0].values
+    b = a.iloc[:, 1].values
+    var_m = np.var(m, ddof=1)
+    if var_m == 0 or not np.isfinite(var_m):
+        return np.nan
+    cov = np.cov(b, m, ddof=1)[0, 1]
+    return cov / var_m
+
+
+def treynor_ratio_series(port: pd.Series, bench: pd.Series) -> float:
+    """Raw Treynor (annualized)."""
+    beta = compute_beta(port, bench)
+    if not np.isfinite(beta) or beta == 0:
+        return np.nan
+    mu_m = float(np.nanmean(port.values)) if len(port) else np.nan
+    return 12.0 * (mu_m / beta)
+
+
+def treynor_ratio_series_absbeta(port: pd.Series, bench: pd.Series) -> float:
+    """
+    Treynor (annualized) using |beta| so 'higher is better' for long and short.
+    """
+    beta = compute_beta(port, bench)
+    if not np.isfinite(beta) or beta == 0:
+        return np.nan
+    mu_m = float(np.nanmean(port.values)) if len(port) else np.nan
+    return 12.0 * (mu_m / abs(beta))
+
+
+def information_ratio_series(port: pd.Series, bench: pd.Series) -> float:
+    a = pd.concat([port, bench], axis=1, join="inner").dropna()
+    if a.shape[0] < 3:
+        return np.nan
+    active = a.iloc[:, 0] - a.iloc[:, 1]
+    std = float(np.nanstd(active.values, ddof=1))
+    if std == 0 or not np.isfinite(std):
+        return np.nan
+    return float(np.nanmean(active.values)) / std * np.sqrt(12)
+
+
+def mean_excess_return_series(port: pd.Series, bench: pd.Series) -> float:
+    a = pd.concat([port, bench], axis=1, join="inner")
+    if a.shape[0] == 0:
+        return np.nan
+    active = a.iloc[:, 0] - a.iloc[:, 1]
+    return float(np.nanmean(active.values))
+
 
 def load_returns(root_dir: Path) -> dict[str, pd.Series]:
     """
@@ -96,383 +208,729 @@ def load_returns(root_dir: Path) -> dict[str, pd.Series]:
         ticker = f.stem.replace("_Monthly_Revenues", "")
         df = (
             pd.read_csv(f)
-              .assign(date=lambda d: pd.to_datetime(d[['year','month']].assign(day=1)),
-                      rtn=lambda d: pd.to_numeric(d['return'], errors='coerce'))
-              .set_index('date')['rtn']
-              .sort_index()
+            .assign(
+                date=lambda d: pd.to_datetime(d[['year', 'month']].assign(day=1)),
+                rtn=lambda d: pd.to_numeric(d['return'], errors='coerce')
+            )
+            .set_index('date')['rtn']
+            .sort_index()
         )
         out[ticker] = df
     return out
 
+
 def nav_from_returns_on_grid(returns: pd.Series,
                              start_value: float,
                              full_index: pd.DatetimeIndex) -> pd.Series:
-    """
-    Accumulate NAV across the given full monthly grid.
-    If a month has NaN return, treat it as 0% (carry forward).
-    NAV reported at each month-end after applying that month's return.
-    """
-    cur = Decimal(str(start_value))
+    cur = float(start_value)
     out_vals, out_idx = [], []
     for dt in full_index:
         r = returns.get(dt, np.nan)
-        step = Decimal(0) if pd.isna(r) else Decimal(str(float(r)))
-        cur *= (Decimal(1) + step)
-        out_vals.append(float(cur))
+        step = 0.0 if pd.isna(r) else float(r)
+        cur *= (1.0 + step)
+        out_vals.append(cur)
         out_idx.append(dt)
     return pd.Series(out_vals, index=out_idx, name="nav")
 
-# ---- Display helper for nice compact tables ----
-def df_to_string_centered(df: pd.DataFrame, index: bool = False) -> str:
-    if df is None or df.empty:
-        return ""
-    df_str = df.copy()
-    if not index:
-        df_str = df_str.reset_index(drop=True)
-    df_str = df_str.astype(str)
-    cols = list(df_str.columns)
-    rows = df_str.values.tolist()
-    widths = []
-    for i, c in enumerate(cols):
-        col_cells = [r[i] for r in rows] if rows else []
-        widths.append(max(len(str(c)), *(len(x) for x in col_cells)) if col_cells else len(str(c)))
-    header = "  ".join(str(c).center(widths[i]) for i, c in enumerate(cols))
-    body_lines = []
-    for r in rows:
-        body_lines.append("  ".join(str(r[i]).center(widths[i]) for i in range(len(cols))))
-    return header + "\n" + "\n".join(body_lines)
-
-# ---- Benchmark & relative-performance helpers (aligned with SSA script)
-def build_equal_weight_benchmark(simple_rets_dict: dict[str, pd.Series],
-                                 start_dt: pd.Timestamp,
-                                 end_dt: pd.Timestamp) -> pd.Series:
-    idx = pd.date_range(start_dt, end_dt, freq='MS')
-    df = pd.DataFrame({t: s.reindex(idx) for t, s in simple_rets_dict.items()})
-    return df.mean(axis=1, skipna=True).rename("benchmark")
-
-def long_benchmark_net(bench_gross_long: pd.Series, entry_cost: float) -> pd.Series:
-    """
-    Convert a gross, LONG benchmark to NET-of-cost (no direction transform).
-    r_net = (1-c)*(1+r) - 1
-    """
-    b = bench_gross_long.astype(float)
-    b = (1.0 - entry_cost) * (1.0 + b) - 1.0
-    return b.rename(f"{bench_gross_long.name or 'benchmark'}_long_net")
-
-def compute_beta(port: pd.Series, bench: pd.Series) -> float:
-    x = bench.dropna()
-    y = port.dropna()
-    z = pd.concat([x, y], axis=1, join="inner")
-    if z.shape[0] < 3:
-        return np.nan
-    b = z.iloc[:, 1]
-    m = z.iloc[:, 0]
-    var_m = np.var(m.values, ddof=1)
-    if var_m == 0 or not np.isfinite(var_m):
-        return np.nan
-    cov = np.cov(b.values, m.values, ddof=1)[0, 1]
-    return cov / var_m
-
-def treynor_ratio_series(port: pd.Series, bench: pd.Series) -> float:
-    """
-    Full-period Treynor (annualized) from monthly returns:
-        Treynor_ann = 12 * mean_m(port) / beta(port, bench)
-    """
-    beta = compute_beta(port, bench)
-    if not np.isfinite(beta) or beta == 0:
-        return np.nan
-    mu = float(np.nanmean(port.values)) if len(port) else np.nan
-    return 12.0 * (mu / beta)
-
-def treynor_ratio_series_absbeta(port: pd.Series, bench: pd.Series) -> float:
-    """
-    Adjusted Treynor (annualized): uses |beta| so 'higher is better' across long/short.
-    """
-    beta = compute_beta(port, bench)
-    if not np.isfinite(beta) or beta == 0:
-        return np.nan
-    mu = float(np.nanmean(port.values)) if len(port) else np.nan
-    return 12.0 * (mu / abs(beta))
-
-def information_ratio_series(port: pd.Series, bench: pd.Series) -> float:
-    """
-    Full-period Information Ratio (annualized) from monthly returns:
-        IR_ann = (mean_m(active) / std_m(active)) * sqrt(12)
-    """
-    a = pd.concat([port, bench], axis=1, join="inner")
-    if a.shape[0] < 3:
-        return np.nan
-    active = a.iloc[:, 0] - a.iloc[:, 1]
-    std = float(np.nanstd(active.values, ddof=1))
-    if std == 0 or not np.isfinite(std):
-        return np.nan
-    return float(np.nanmean(active.values)) / std * np.sqrt(12)
-
-def mean_excess_return_series(port: pd.Series, bench: pd.Series) -> float:
-    """
-    Mean monthly excess return vs. benchmark (NET; not annualized).
-    """
-    a = pd.concat([port, bench], axis=1, join="inner")
-    if a.shape[0] == 0:
-        return np.nan
-    active = a.iloc[:, 0] - a.iloc[:, 1]
-    return float(np.nanmean(active.values))
 
 def sharpe_ratio(returns: list[Decimal] | np.ndarray) -> float:
     arr = np.array([float(r) for r in returns], dtype=float)
-    if arr.size == 0: return np.nan
+    if arr.size < 2:
+        return np.nan
     std = arr.std(ddof=1)
-    if std == 0 or not np.isfinite(std): return np.nan
+    if std == 0 or not np.isfinite(std):
+        return np.nan
     return arr.mean() / std * np.sqrt(12)
+
 
 def sortino_ratio(returns: list[Decimal] | np.ndarray) -> float:
     arr = np.array([float(r) for r in returns], dtype=float)
-    if arr.size == 0: return np.nan
+    if arr.size == 0:
+        return np.nan
     neg = arr[arr < 0]
-    if neg.size == 0: return np.nan
+    if neg.size < 2:
+        return np.nan
     std_neg = neg.std(ddof=1)
-    if std_neg == 0 or not np.isfinite(std_neg): return np.nan
+    if std_neg == 0 or not np.isfinite(std_neg):
+        return np.nan
     return arr.mean() / std_neg * np.sqrt(12)
+
 
 def calmar_ratio(returns: list[Decimal] | np.ndarray) -> float:
     arr = np.array([float(r) for r in returns], dtype=float)
-    if arr.size == 0: return np.nan
+    if arr.size == 0:
+        return np.nan
     cum = np.cumprod(1 + arr)
-    if cum.size == 0: return np.nan
-    years = len(arr) / 12
-    if years <= 0: return np.nan
+    if cum.size == 0:
+        return np.nan
+    years = len(arr) / 12.0
+    if years <= 0:
+        return np.nan
     cagr = cum[-1] ** (1 / years) - 1
     peak = np.maximum.accumulate(cum)
-    dd = cum / peak - 1
-    mdd = abs(dd.min()) if len(dd) else np.nan
-    if not np.isfinite(mdd) or mdd == 0: return np.nan
-    return cagr / mdd
+    dd = cum / peak - 1.0
+    mdd = dd.min() if dd.size else np.nan  # negative
+    if not np.isfinite(mdd) or mdd == 0:
+        return np.nan
+    return cagr / abs(mdd)
 
-def minmax_01(arr_like) -> np.ndarray:
-    x = np.asarray(arr_like, dtype=float)
-    mask = np.isfinite(x)
-    if not mask.any():
-        return np.full_like(x, np.nan, dtype=float)
-    xmin, xmax = np.nanmin(x[mask]), np.nanmax(x[mask])
-    if xmax == xmin:
-        out = np.full_like(x, np.nan, dtype=float)
-        out[mask] = 1.0
-        return out
-    out = (x - xmin) / (xmax - xmin)
-    out[~mask] = np.nan
-    return np.clip(out, 0.0, 1.0)
-
-def gps_harmonic_01(vals: list[float] | np.ndarray) -> float:
-    v = np.asarray(vals, dtype=float)
-    if np.isnan(v).any(): return np.nan
-    if np.any(v < 0):     return np.nan
-    if np.any(v == 0.0):  return 0.0
-    return len(v) / np.sum(1.0 / v)
 
 # =============================== #
 # 4) LOAD DATA
 # =============================== #
 base = ROOT_DIR
-# RLSSA is fit on LOG monthly returns; GPS metrics/compounding use SIMPLE monthly returns
-log_rets    = load_returns(base / "All_Monthly_Log_Return_Data")
-simple_rets = load_returns(base / "All_Monthly_Return_Data")
-tickers     = list(log_rets.keys())
+
+
+def load_all():
+    log_rets = load_returns(base / "All_Monthly_Log_Return_Data")
+    simple_rets = load_returns(base / "All_Monthly_Return_Data")
+    return log_rets, simple_rets, list(log_rets.keys())
+
+
+log_rets, simple_rets, tickers = load_all()
+
 
 # =============================== #
-# 5) EWMA NOISE & SIM HELPERS
+# 5) MONTE CARLO LAYER — Maximum Entropy Bootstrap (MEB)
 # =============================== #
-def backcast_sigma0(first_vals: np.ndarray, lam=LAMBDA_EWMA) -> float:
-    w = lam ** np.arange(len(first_vals)-1, -1, -1)
-    var0 = float(np.sum(w * (first_vals**2)) / np.sum(w))
-    return np.sqrt(var0)
 
-def ewma_projected_sigma_series(log_series: pd.Series,
-                                lam=LAMBDA_EWMA,
-                                n_init=BACKCAST_N) -> pd.Series:
+def maximum_entropy_bootstrap_1d(x: np.ndarray,
+                                 rng: np.random.Generator,
+                                 trim_prop: float = MEB_TRIM) -> np.ndarray:
     """
-    Deterministic σ_proj(t) from base log returns (no look-ahead).
-    σ used at month t is σ_{t-1}; seeded by 12m backcast.
+    One Maximum Entropy Bootstrap (MEB) replicate of a 1D array x.
+
+    Tail extension m_trm is based on a trimmed mean of absolute
+    consecutive differences in TIME ORDER, as in Vinod's meboot.
     """
-    s = log_series.sort_index().astype(float)
-    arr = s.values
-    sig_proj = np.empty_like(arr)
-    if len(arr) < n_init:
-        sigma0 = np.std(arr, ddof=1) if len(arr) > 1 else float(np.mean(np.abs(arr)))
+    x = np.asarray(x, dtype=float)
+    T = x.size
+    if T < 3:
+        return x.copy()
+
+    # 1) Sort values and keep the permutation (time indices)
+    order = np.argsort(x)
+    x_sorted = x[order]
+
+    # 2) Internal interval boundaries z_1,...,z_{T-1}
+    mid = 0.5 * (x_sorted[:-1] + x_sorted[1:])  # length T-1
+
+    # 2′) Tail extension m_trm from ABSOLUTE consecutive differences in TIME ORDER
+    diffs = np.diff(x)                      # time-order differences
+    diffs = np.abs(diffs)                   # absolute
+    diffs = diffs[np.isfinite(diffs)]
+    if diffs.size == 0:
+        m_trm = 0.0
     else:
-        sigma0 = backcast_sigma0(arr[:n_init], lam)
-    prev_sigma = sigma0
-    for k in range(len(arr)):
-        sig_proj[k] = prev_sigma
-        prev_sigma = np.sqrt(lam * (prev_sigma**2) + (1 - lam) * (arr[k]**2))
-    return pd.Series(sig_proj, index=s.index)
+        n = diffs.size
+        k = int(np.floor(trim_prop * n))    # e.g. 10% trimming in each tail
+        if 2 * k >= n:
+            m_trm = float(diffs.mean())
+        else:
+            diffs_sorted = np.sort(diffs)
+            m_trm = float(diffs_sorted[k:n - k].mean())
 
-def precompute_sigma_proj_for_all(log_rets_dict: dict[str, pd.Series], lam=LAMBDA_EWMA) -> dict[str, np.ndarray]:
-    """Precompute σ_proj arrays once per ticker."""
-    return {tkr: ewma_projected_sigma_series(s, lam=lam).values for tkr, s in log_rets_dict.items()}
+    # 3) Full boundaries z_0,...,z_T
+    z = np.empty(T + 1, dtype=float)
+    z[0] = x_sorted[0] - m_trm
+    z[1:T] = mid
+    z[T] = x_sorted[-1] + m_trm
 
-def simulate_log_returns_with_sigma(log_rets_dict: dict[str, pd.Series],
-                                    sigma_proj: dict[str, np.ndarray] | None,
-                                    lam=LAMBDA_EWMA,
-                                    rng: np.random.Generator | None = None,
-                                    no_noise: bool = False) -> dict[str, pd.Series]:
+    # 4) Draw uniforms, map each to its interval, and sample linearly
+    u = rng.uniform(0.0, 1.0, size=T)
+    u.sort()
+    x_star_sorted = np.empty(T, dtype=float)
+
+    for j in range(T):
+        v = T * u[j] - j
+        v = float(np.clip(v, 0.0, 1.0))
+        width = z[j + 1] - z[j]
+        x_star_sorted[j] = z[j] + v * width
+
+    # 5) Restore original time order
+    x_star = np.empty(T, dtype=float)
+    x_star[order] = x_star_sorted
+
+    # Simple mean-preserving adjustment (global shift)
+    mu_orig = float(np.mean(x))
+    mu_star = float(np.mean(x_star))
+    if np.isfinite(mu_orig) and np.isfinite(mu_star):
+        x_star += (mu_orig - mu_star)
+
+    return x_star
+
+
+
+def maximum_entropy_bootstrap_series(s: pd.Series,
+                                     rng: np.random.Generator,
+                                     trim_prop: float = 0.1) -> pd.Series:
     """
-    r_sim(t) = r_base(t) + σ_proj(t) * z_t,  z_t ~ N(0,1) iid per ticker.
-    If no_noise=True, returns base log series (no perturbation).
-    If sigma_proj is None, compute on the fly (fallback).
+    Apply one MEB replicate to a pandas Series (e.g. log returns).
     """
-    if no_noise:
-        return {tkr: s.dropna().sort_index().astype(float).copy() for tkr, s in log_rets_dict.items()}
-    if rng is None:
-        rng = np.random.default_rng()
-    sim = {}
+    s = s.dropna().sort_index().astype(float)
+    if s.size < 3:
+        return s.copy()
+
+    arr_star = maximum_entropy_bootstrap_1d(s.values, rng=rng, trim_prop=trim_prop)
+    out = pd.Series(arr_star, index=s.index, name=s.name)
+    return out
+
+
+def simulate_log_returns_meb(log_rets_dict: dict[str, pd.Series],
+                             rng: np.random.Generator,
+                             no_bootstrap: bool = False,
+                             trim_prop: float = 0.1) -> dict[str, pd.Series]:
+    """
+    Monte Carlo layer based on Maximum Entropy Bootstrap (MEB).
+    """
+    sim: dict[str, pd.Series] = {}
     for tkr, s in log_rets_dict.items():
         s = s.dropna().sort_index().astype(float)
         if s.empty:
             continue
-        sig = sigma_proj[tkr] if sigma_proj and tkr in sigma_proj else ewma_projected_sigma_series(s, lam=lam).values
-        z = rng.standard_normal(len(s))
-        r_sim = s.values + sig * z
-        sim[tkr] = pd.Series(r_sim, index=s.index)
+        if no_bootstrap:
+            sim[tkr] = s.copy()
+        else:
+            sim[tkr] = maximum_entropy_bootstrap_series(
+                s, rng=rng, trim_prop=trim_prop
+            )
+            sim[tkr].name = tkr
     return sim
 
+
 def log_to_simple_dict(log_rets_dict: dict[str, pd.Series]) -> dict[str, pd.Series]:
-    return {tkr: (np.exp(s.astype(float)) - 1.0).rename(tkr) for tkr, s in log_rets_dict.items()}
+    """
+    Convert LOG monthly returns to SIMPLE monthly returns.
+    """
+    return {tkr: (np.exp(s.astype(float)) - 1.0).rename(tkr)
+            for tkr, s in log_rets_dict.items()}
+
+
+def generate_simulated_simple_returns_for_run(
+        rng: np.random.Generator,
+        zero_noise: bool,
+        trim_prop: float = 0.1,
+):
+    """
+    For a given Monte Carlo run (MEB version).
+    """
+    log_sim = simulate_log_returns_meb(
+        log_rets, rng=rng, no_bootstrap=zero_noise, trim_prop=trim_prop
+    )
+    simple_sim = log_to_simple_dict(log_sim)
+    return simple_sim, log_sim
+
 
 # =============================== #
-# 6) RLSSA CORE
+# 6) RISK-AWARE NORMALISATION (EWMA VOL + RUNNING MEAN)
 # =============================== #
-def robust_low_rank(X: np.ndarray, q: int, max_iter: int = 25, eps: float = 1e-7):
-    """
-    Iteratively reweighted low-rank factorization of X (L×K).
-    Returns U (L×q_eff) and V (K×q_eff) such that X ≈ U V^T, robust to outliers.
-    """
-    U0, s0, V0t = np.linalg.svd(X, full_matrices=False)
-    r0 = min(q, s0.size)
-    U = U0[:, :r0] * np.sqrt(s0[:r0])
-    V = (V0t[:r0, :].T) * np.sqrt(s0[:r0])
 
-    for _ in range(max_iter):
-        R = X - U @ V.T
-        W = 1.0 / (np.abs(R) + eps)                 # elementwise weights
-        Xw = np.sqrt(W) * X                         # elementwise weighting
-        Uw, sw, Vwt = np.linalg.svd(Xw, full_matrices=False)
-        r0 = min(q, sw.size)
-        U = Uw[:, :r0] * np.sqrt(sw[:r0])
-        V = (Vwt[:r0, :].T) * np.sqrt(sw[:r0])
-    return U, V
+def ewma_vol_forecast_series(log_returns: pd.Series,
+                             lam: float = EWMA_LAMBDA) -> pd.Series:
+    """
+    EWMA volatility forecast sigma_t using only r_0,...,r_{t-1}.
+    """
+    s = log_returns.dropna().sort_index().astype(float)
+    N = s.size
+    if N == 0:
+        return s.copy()
 
-def compute_rlssa_forecast(series: np.ndarray, L: int, q: int) -> float:
+    r = s.values
+    sig = np.empty(N, dtype=float)
+
+    if N >= 12:
+        sigma2_prev = float(np.mean(r[:12] ** 2))
+    else:
+        sigma2_prev = float(r[0] ** 2)
+
+    sig[0] = np.sqrt(max(sigma2_prev, 1e-12))
+
+    for t in range(1, N):
+        sigma2 = lam * sigma2_prev + (1.0 - lam) * float(r[t - 1]) ** 2
+        sig[t] = np.sqrt(max(sigma2, 1e-12))
+        sigma2_prev = sigma2
+
+    return pd.Series(sig, index=s.index, name=f"{s.name}_ewma_vol")
+
+def risk_adjusted_normalised_series(log_returns: pd.Series,
+                                    lam: float = EWMA_LAMBDA,
+                                    lookback_years: int | None = LOOKBACK_YEARS) -> pd.Series:
     """
-    RLSSA one-step forecast using robust low-rank trajectory approximation.
-      1) Build trajectory matrix X (L×K)
-      2) Robust low-rank factorization X ≈ U V^T (rank q)
-      3) Hankelize S = U V^T to reconstructed series rec (length N)
-      4) Linear recurrence from left singular vectors of S (like SSA)
-      5) forecast = sum a_j * rec[N-j], j = 1..L-1
+    y_t = (r_t - μ_t) / σ_t
+
+    Logic:
+      1) Compute EWMA volatility σ_t for the whole series (one σ_t per month t).
+      2) For the mean μ_t, with lookback_years (e.g. 10 years = 120 months):
+
+         - If N < window (lookback period), use the full-sample mean for all t.
+         - If N >= window:
+             * For the first `window` months (t = 1..window):
+                 μ_t is the SAME constant = mean of the first `window` returns.
+             * From month t = window+1 onward:
+                 μ_t is a rolling mean over the LAST `window` returns
+                 (i.e. at t, mean of r_{t-window+1}, ..., r_t).
+
+      So the mean is constant on the first block, then a sliding window afterwards.
     """
-    x = np.asarray(series, dtype=float).ravel()
-    if np.any(~np.isfinite(x)): return np.nan
+    s = log_returns.dropna().sort_index().astype(float)
+    N = s.size
+    if N == 0:
+        return s.copy()
+
+    # 1) EWMA volatility forecast σ_t for each t (uses only past returns internally)
+    sig_series = ewma_vol_forecast_series(s, lam=lam)
+    sig = sig_series.values
+    sig_safe = np.where(sig <= 0.0, np.nan, sig)
+
+    # 2) Mean μ_t
+    if lookback_years is None:
+        # No explicit lookback: use one global mean for all t
+        mu_val = float(s.mean())
+        mu_vals = np.full(N, mu_val, dtype=float)
+
+    else:
+        window = int(lookback_years * 12)
+        if window <= 0:
+            mu_val = float(s.mean())
+            mu_vals = np.full(N, mu_val, dtype=float)
+        elif N < window:
+            # Series shorter than lookback: just use full-sample mean for all t
+            mu_val = float(s.mean())
+            mu_vals = np.full(N, mu_val, dtype=float)
+        else:
+            # Rolling mean over EXACTLY `window` observations
+            # rolling_mean[t] is mean of s[t-window+1 : t+1] for t >= window-1
+            rolling_mean = s.rolling(window=window, min_periods=window).mean()
+
+            mu_vals = np.empty(N, dtype=float)
+
+            # First `window` months all use the same mean = mean of first `window` returns
+            base_mean = float(rolling_mean.iloc[window - 1])  # mean of s[0:window]
+            mu_vals[:window] = base_mean
+
+            # From t = window onward, use the rolling window mean
+            # (indices window .. N-1 correspond to months window+1 .. N in 1-based terms)
+            mu_vals[window:] = rolling_mean.iloc[window:].to_numpy()
+
+    # 3) Normalised series y_t
+    y_vals = (s.values - mu_vals) / sig_safe
+    return pd.Series(y_vals, index=s.index, name=f"{s.name}_risknorm")
+
+def build_risk_adjusted_log_dict(log_rets_dict: dict[str, pd.Series],
+                                 lam: float = EWMA_LAMBDA,
+                                 lookback_years: int | None = LOOKBACK_YEARS) -> dict[str, pd.Series]:
+    """
+    Apply risk-adjusted normalisation contract by contract.
+    """
+    out: dict[str, pd.Series] = {}
+    for tkr, s in log_rets_dict.items():
+        out[tkr] = risk_adjusted_normalised_series(s, lam=lam, lookback_years=lookback_years)
+    return out
+
+
+# =============================== #
+# 7) RLSSA FORECASTS & RANKINGS (CLASSIC VS RISK-ADJUSTED)
+# =============================== #
+
+def _build_trajectory_matrix(x: np.ndarray, L: int) -> np.ndarray:
+    """
+    Build Hankel trajectory matrix X (L x K) from series x of length N.
+    """
     N = x.size
-    if not (1 < L < N) or q < 1: return np.nan
     K = N - L + 1
+    X = np.empty((L, K), dtype=float)
+    for i in range(K):
+        X[:, i] = x[i:i + L]
+    return X
 
-    # 1) trajectory
-    X = np.column_stack([x[i:i+L] for i in range(K)])  # L×K
 
-    # 2) robust low-rank
-    U_r, V_r = robust_low_rank(X, q=q)
-    S = U_r @ V_r.T                                   # L×K
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """
+    Weighted median mirroring matrixStats::weightedMedian(x, w,
+    na.rm = TRUE, interpolate = FALSE, ties = "weighted").
 
-    # 3) hankelize to reconstructed series
-    rec = np.zeros(N, dtype=float)
-    cnt = np.zeros(N, dtype=float)
+    Optimised version (vectorised aggregation), same algorithmic behaviour
+    as the slower loop-based implementation.
+    """
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+
+    # Drop NA in x or w (na.rm = TRUE)
+    mask = ~np.isnan(values) & ~np.isnan(weights)
+    if not np.any(mask):
+        return 0.0
+
+    values = values[mask]
+    weights = weights[mask]
+
+    if values.size == 0:
+        return 0.0
+
+    # Negative weights treated as zero
+    weights = np.where(weights > 0.0, weights, 0.0)
+
+    total_w = float(np.sum(weights))
+    if total_w == 0.0:
+        return 0.0
+
+    # Special case: any infinite weights => treat all Inf weights equal, others 0
+    if np.any(np.isinf(weights)):
+        inf_mask = np.isinf(weights)
+        vals_inf = values[inf_mask]
+        if vals_inf.size == 0:
+            return 0.0
+        return float(np.median(vals_inf))
+
+    # Sort by values
+    order = np.argsort(values)
+    v_sorted = values[order]
+    w_sorted = weights[order]
+
+    # Collapse equal x's with summed weights (vectorised)
+    if v_sorted.size == 1:
+        uniq_vals = v_sorted
+        uniq_w = w_sorted
+    else:
+        diff = v_sorted[1:] != v_sorted[:-1]
+        starts = np.empty(diff.sum() + 1, dtype=int)
+        starts[0] = 0
+        starts[1:] = 1 + np.nonzero(diff)[0]
+
+        uniq_vals = v_sorted[starts]
+        uniq_w = np.add.reduceat(w_sorted, starts)
+
+    cum_w = np.cumsum(uniq_w)
+    S = float(cum_w[-1])
+    half = 0.5 * S
+
+    w_less = np.concatenate(([0.0], cum_w[:-1]))
+    w_greater = S - cum_w
+
+    cand_mask = (w_less <= half) & (w_greater <= half)
+    cand_idx = np.nonzero(cand_mask)[0]
+
+    if cand_idx.size == 0:
+        k = int(np.searchsorted(cum_w, half, side="left"))
+        return float(uniq_vals[k])
+
+    if cand_idx.size == 1:
+        return float(uniq_vals[cand_idx[0]])
+
+    # Two candidates: ties = "weighted"
+    i_low, i_high = int(cand_idx[0]), int(cand_idx[1])
+    w_le_low = cum_w[i_low]
+    if i_high > 0:
+        w_ge_high = S - cum_w[i_high - 1]
+    else:
+        w_ge_high = S
+
+    num = w_le_low * uniq_vals[i_low] + w_ge_high * uniq_vals[i_high]
+    den = w_le_low + w_ge_high
+    if den == 0.0:
+        return float(0.5 * (uniq_vals[i_low] + uniq_vals[i_high]))
+    return float(num / den)
+
+
+def _l1_reg_coef(x: np.ndarray, a: np.ndarray, eps: float) -> float:
+    """
+    L1RegCoef from R robustSvd: one-dimensional L1 regression coefficient.
+    """
+    x = np.asarray(x, dtype=float)
+    a = np.asarray(a, dtype=float)
+
+    keep = (np.abs(a) > eps) & (~np.isnan(x))
+    if not np.any(keep):
+        return 0.0
+
+    x_keep = x[keep]
+    a_keep = a[keep]
+    z = x_keep / a_keep
+    w = np.abs(a_keep)
+
+    return _weighted_median(z, w)
+
+
+def _l1_eigen(x: np.ndarray, a: np.ndarray, b: np.ndarray, eps: float) -> float:
+    """
+    L1Eigen from R robustSvd.
+    """
+    x_vec = np.asarray(x, dtype=float).reshape(-1)
+    ab = np.outer(a, b).reshape(-1)
+
+    keep = (np.abs(ab) > eps) & (~np.isnan(x_vec))
+    if not np.any(keep):
+        return 0.0
+
+    xk = x_vec[keep]
+    abk = ab[keep]
+    z = xk / abk
+    w = np.abs(abk)
+
+    return _weighted_median(z, w)
+
+
+def robust_svd(X: np.ndarray,
+               rank: int | None = None,
+               max_iters: int = RLSSA_MAX_ITERS,
+               tol: float = RLSSA_TOL) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Python port of the R robustSvd() function (Hawkins AL1 algorithm),
+    truncated to 'rank' components and with bounded iterations.
+
+    Returns (u, d, v) such that X ≈ u diag(d) v^T where:
+      - u: shape (m, r_used)
+      - d: shape (r_used,)
+      - v: shape (n, r_used)
+    """
+    X = np.asarray(X, dtype=float)
+    m, n = X.shape
+    eps = np.finfo(float).eps
+
+    max_rank = min(m, n)
+    if rank is None:
+        r = max_rank
+    else:
+        r = max(1, min(rank, max_rank))
+
+    svdu = np.empty((m, r), dtype=float)
+    svdv = np.empty((n, r), dtype=float)
+    svdd = np.empty(r, dtype=float)
+
+    X_resid = X.copy()
+
+    for k in range(r):
+        ak = np.nanmedian(np.abs(X_resid), axis=1)
+        converged = False
+
+        for _ in range(max_iters):
+            akprev = ak.copy()
+
+            c = np.empty(n, dtype=float)
+            for j in range(n):
+                c[j] = _l1_reg_coef(X_resid[:, j], ak, eps)
+
+            norm_c = float(np.sqrt(np.sum(c ** 2)))
+            if norm_c == 0.0:
+                bk = np.zeros(n, dtype=float)
+            else:
+                bk = c / norm_c
+
+            d = np.empty(m, dtype=float)
+            for i in range(m):
+                d[i] = _l1_reg_coef(X_resid[i, :], bk, eps)
+
+            norm_d = float(np.sqrt(np.sum(d ** 2)))
+            if norm_d == 0.0:
+                ak = np.zeros(m, dtype=float)
+            else:
+                ak = d / norm_d
+
+            diff = ak - akprev
+            if float(np.sum(diff ** 2)) < tol:
+                converged = True
+                break
+
+        eigenk = _l1_eigen(X_resid, ak, bk, eps)
+        X_resid = X_resid - eigenk * np.outer(ak, bk)
+
+        svdu[:, k] = ak
+        svdv[:, k] = bk
+        svdd[k] = eigenk
+
+    return svdu, svdd, svdv
+
+
+def rlssa_forecast(log_returns: pd.Series,
+                   L: int = RLSSA_L,
+                   r: int = RLSSA_R) -> float:
+    """
+    One-step-ahead RLSSA forecast.
+
+    (i) Robust L1 SVD -> robust low-rank signal matrix S
+    (ii) Hankelization -> recon
+    (iii) Classical SSA LRR coefficients on S + recurrent forecast
+    """
+    x = log_returns.dropna().to_numpy(dtype=float)
+    N = x.size
+    if N < 2:
+        return np.nan
+
+    if L >= N:
+        L = N - 1
+    if L < 2:
+        L = 2
+
+    K = N - L + 1
+    X = _build_trajectory_matrix(x, L)  # L x K
+
+    # Stage (i): robust SVD (truncated) with classical fallback
+    try:
+        U_r, d_r, V_r = robust_svd(X, rank=r)
+    except Exception:
+        U_full, d_full, Vt_full = np.linalg.svd(X, full_matrices=False)
+        r_eff_fb = min(r, U_full.shape[1])
+        U_r = U_full[:, :r_eff_fb]
+        d_r = d_full[:r_eff_fb]
+        V_r = Vt_full.T[:, :r_eff_fb]
+
+    r_eff = min(r, U_r.shape[1])
+
+    S = np.zeros_like(X)
+    for i in range(r_eff):
+        ui = U_r[:, i:i + 1]   # L x 1
+        vi = V_r[:, i:i + 1]   # K x 1
+        S += d_r[i] * (ui @ vi.T)
+
+    # Hankelization -> recon
+    recon = np.zeros(N, dtype=float)
+    counts = np.zeros(N, dtype=int)
     for i in range(L):
         for j in range(K):
-            rec[i + j] += S[i, j]
-            cnt[i + j] += 1.0
-    if not np.all(cnt > 0): return np.nan
-    rec /= cnt
+            idx = i + j
+            recon[idx] += S[i, j]
+            counts[idx] += 1
+    counts[counts == 0] = 1
+    recon /= counts
 
-    # 4) recurrence from S's left singular vectors
-    Uc, sc, Vct = np.linalg.svd(S, full_matrices=False)
-    r_eff = int(min(q, sc.size))
-    if r_eff < 1: return np.nan
-    Uc = Uc[:, :r_eff]
-    P_head = Uc[:-1, :]
-    phi    = Uc[-1, :]
-    nu2    = float(np.dot(phi, phi))
-    if 1.0 - nu2 <= 1e-10: return np.nan
-    R = (P_head @ phi) / (1.0 - nu2)      # (a_{L-1},...,a_1)
-    a = R[::-1]                            # (a_1,...,a_{L-1})
+    # Stage (ii): classical SVD on S for LRR coefficients
+    U2, d2, Vt2 = np.linalg.svd(S, full_matrices=False)
+    r_eff2 = min(r, U2.shape[1])
 
-    # 5) one-step forecast
-    lags = rec[-1: -L: -1]
-    if lags.size != a.size: return np.nan
-    return float(np.dot(a, lags))
+    if L <= 1:
+        return float(recon[-1])
 
-# =============================== #
-# 7) RLSSA RANKINGS ON SIMULATED SERIES
-# =============================== #
-def build_rlssa_rankings_from_log_rets(log_rets_sim: dict[str, pd.Series],
-                                       simple_rets_sim: dict[str, pd.Series],
-                                       lookback_years: int) -> tuple[dict, dict, dict]:
+    nu2 = 0.0
+    R_vec = np.zeros(L - 1, dtype=float)   # [a_{L-1},...,a_1]
+    for j in range(r_eff2):
+        P_j = U2[:L - 1, j]
+        phi_j = U2[L - 1, j]
+        nu2 += phi_j ** 2
+        R_vec += phi_j * P_j
+
+    if abs(1.0 - nu2) < 1e-8:
+        # fallback AR(1) on recon
+        if N < 3:
+            return float(recon[-1])
+        y1 = recon[1:]
+        ylag = recon[:-1]
+        denom = float(np.dot(ylag, ylag))
+        if denom == 0.0:
+            return float(recon[-1])
+        phi = float(np.dot(ylag, y1) / denom)
+        return float(recon[-1] * phi)
+
+    R_vec /= (1.0 - nu2)
+    a = R_vec[::-1]   # [a_1,...,a_{L-1}]
+
+    # Stage (iii): 1-step recurrent forecast
+    if N > L:
+        x_tail = recon[N - L + 1: N]   # length L-1
+    else:
+        x_tail = recon.copy()
+        if x_tail.size < (L - 1):
+            pad = np.full((L - 1 - x_tail.size,), x_tail[0], dtype=float)
+            x_tail = np.concatenate([pad, x_tail])
+    x_tail_rev = x_tail[::-1]
+    forecast = float(np.dot(a, x_tail_rev))
+    return forecast
+
+
+def rlssa_signal_for_month(log_series: pd.Series,
+                           forecast_month: pd.Timestamp,
+                           lookback_years: int | None,
+                           L: int = RLSSA_L,
+                           r: int = RLSSA_R) -> float:
     """
-    Returns (long_rankings, short_rankings, season_score_by_month) for all months TEST_SIM_START..FINAL_END.
-    Only Top-1 will be used downstream.
+    Compute RLSSA one-step-ahead forecast for a given contract and forecast month,
+    using a rolling lookback window of length `lookback_years` (in years).
+
+    The series is restricted to data strictly before `forecast_month`.
+    """
+    end_dt = forecast_month - relativedelta(months=1)
+    s = log_series.loc[:end_dt].dropna()
+    if lookback_years is not None:
+        cutoff = forecast_month - relativedelta(years=lookback_years)
+        s = s[s.index >= cutoff]
+    if s.size < 12:
+        return np.nan
+    return rlssa_forecast(s, L=L, r=r)
+
+
+# Helper for parallel RLSSA signal computation (must be top-level for pickling)
+def _rlssa_signal_for_ticker_month(args):
+    tkr, values, idx, forecast_month, lookback_years = args
+    s = pd.Series(values, index=idx)
+    sig = rlssa_signal_for_month(s, forecast_month, lookback_years,
+                                 L=RLSSA_L, r=RLSSA_R)
+    return tkr, sig
+
+
+def build_rankings_from_log_rets(log_rets_sim: dict[str, pd.Series],
+                                 lookback_years: int) -> tuple[dict, dict]:
+    """
+    Build monthly RLSSA-based rankings for LONG and SHORT directions based on
+    (possibly transformed) log-return series.
+
+    For each month in [FINAL_SIM_START, FINAL_END]:
+      - For each contract, fit RLSSA to the last `lookback_years` of data
+        and compute the one-step-ahead forecast.
+      - Use the forecast as the seasonality signal:
+          * LONG: sort descending by forecast
+          * SHORT: sort ascending by forecast
+
+    This implementation parallelises across tickers for each month and prints
+    a simple month counter for progress monitoring. Mathematical logic for
+    RLSSA and rankings is unchanged.
     """
     tickers_sim = list(log_rets_sim)
     long_rankings, short_rankings = {}, {}
-    season_score_by_month_sim = {}
 
-    cur = TEST_SIM_START
-    while cur <= FINAL_END:
-        stats_rows = []
-        lb0 = cur - relativedelta(years=lookback_years)
-        lb1 = cur - relativedelta(months=1)
+    cur = pd.Timestamp(FINAL_SIM_START)
+    final_end = pd.Timestamp(FINAL_END)
 
-        for t in tickers_sim:
-            s_log = log_rets_sim[t].loc[lb0:lb1].dropna()
-            if len(s_log) < SSA_WINDOW:
-                continue
+    # Pre-extract numeric arrays and indices for cheaper pickling
+    series_data = {
+        t: (s.dropna().sort_index().values.astype(float),
+            s.dropna().sort_index().index)
+        for t, s in log_rets_sim.items()
+    }
 
-            rlssa_val = compute_rlssa_forecast(s_log.values, L=SSA_WINDOW, q=SSA_COMPS)
+    all_months = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
+    total_months = len(all_months)
+    month_counter = 0
 
-            score = rlssa_val
-            if RLSSA_USE_EWMA_SCALE and np.isfinite(rlssa_val):
-                s_simple = simple_rets_sim.get(t, pd.Series()).loc[lb0:lb1].dropna()
-                if len(s_simple) >= MIN_OBS_FOR_VOL:
-                    alpha = 1.0 - RLSSA_EWMA_LAMBDA
-                    ewma_var = (s_simple.astype(float)**2).ewm(alpha=alpha, adjust=False).mean().iloc[-1]
-                    sigma = float(np.sqrt(ewma_var)) if np.isfinite(ewma_var) else np.nan
-                    score = rlssa_val / sigma if (sigma and np.isfinite(sigma) and sigma > 0) else np.nan
-                else:
-                    score = np.nan
+    with ProcessPoolExecutor(max_workers=RLSSA_MAX_WORKERS) as ex:
+        while cur <= final_end:
+            # Submit RLSSA tasks for all tickers in this month
+            futures = []
+            for t in tickers_sim:
+                vals, idx = series_data[t]
+                futures.append(
+                    ex.submit(
+                        _rlssa_signal_for_ticker_month,
+                        (t, vals, idx, cur, lookback_years)
+                    )
+                )
 
-            if np.isfinite(score):
-                stats_rows.append({'ticker': t, 'score': float(score)})
+            rows = []
+            for fut in as_completed(futures):
+                tkr, f = fut.result()
+                if np.isfinite(f):
+                    rows.append({'ticker': tkr, 'signal': f})
 
-        if not stats_rows:
-            long_rankings[cur]  = tickers_sim.copy()
-            short_rankings[cur] = tickers_sim.copy()
-        else:
-            dfm = pd.DataFrame(stats_rows).set_index('ticker')
+            if rows:
+                dfm = pd.DataFrame(rows).set_index('ticker')
+                orderL = dfm.sort_values('signal', ascending=False).index.tolist()
+                orderS = dfm.sort_values('signal', ascending=True).index.tolist()
+            else:
+                orderL, orderS = [], []
 
-            # keep per-month RLSSA scores for GPS calibration
-            season_score_by_month_sim[cur] = dfm['score'].to_dict()
+            long_rankings[cur] = orderL
+            short_rankings[cur] = orderS
+            cur = cur + relativedelta(months=1)
 
-            # LONG: highest score first; SHORT: lowest score first
-            orderL = dfm.sort_values('score', ascending=False).index.tolist()
-            orderS = dfm.sort_values('score', ascending=True ).index.tolist()
+    return long_rankings, short_rankings
 
-            # include missing names at the end (preserve universe order)
-            orderL += [t for t in tickers_sim if t not in orderL]
-            orderS += [t for t in tickers_sim if t not in orderS]
-            long_rankings[cur]  = orderL[:len(tickers_sim)]
-            short_rankings[cur] = orderS[:len(tickers_sim)]
-
-        cur += relativedelta(months=1)
-
-    return long_rankings, short_rankings, season_score_by_month_sim
 
 # =============================== #
 # 8) TOP-1 MONTHLY SERIES
@@ -485,11 +943,6 @@ def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
                          end_dt: pd.Timestamp,
                          entry_cost: float,
                          return_tickers: bool = False) -> pd.Series | tuple[pd.Series, pd.Series]:
-    """
-    TOP-1 ONLY: uses order[0] for each month.
-    If return_tickers=True, also returns a Series of the chosen ticker strings (always recorded),
-    while returns are NaN when the chosen ticker has no return for that month.
-    """
     out_ret, out_tkr, idx = [], [], []
     for dt in pd.date_range(start_dt, end_dt, freq='MS'):
         order = rankings.get(dt)
@@ -504,17 +957,16 @@ def monthly_top1_returns(rankings: dict[pd.Timestamp, list[str]],
             r = float(s.loc[dt])
             if direction == 'short':
                 r = (1.0 / (1.0 + r)) - 1.0
-            r_wc = (1.0 - entry_cost) * (1.0 + r) - 1.0
-        out_ret.append(r_wc); idx.append(dt)
+            r_wc = apply_roundtrip_cost(r, entry_cost)
+        out_ret.append(r_wc)
+        idx.append(dt)
     ret_ser = pd.Series(out_ret, index=idx, name='top1_return')
     if return_tickers:
         tkr_ser = pd.Series(out_tkr, index=idx, name='top1_ticker')
         return ret_ser, tkr_ser
     return ret_ser
 
-# =============================== #
-# 9) GPS MAPPING (RLSSA) — metrics use LONG-ONLY net benchmark
-# =============================== #
+
 def max_drawdown_from_monthly(returns: pd.Series) -> float:
     r = pd.Series(returns, dtype=float).dropna()
     if r.empty:
@@ -522,231 +974,43 @@ def max_drawdown_from_monthly(returns: pd.Series) -> float:
     cum = (1.0 + r.values).cumprod()
     peak = np.maximum.accumulate(cum)
     dd = cum / peak - 1.0
-    return float(dd.min())  # signed (≤0)
+    return float(dd.min())  # negative (higher is better)
 
-def compute_gps_mapping_for_month_rlssa(dt: pd.Timestamp,
-                                        rankings: dict[pd.Timestamp, list[str]],
-                                        simple_rets_dict: dict[str, pd.Series],
-                                        season_score_by_month: dict[pd.Timestamp, dict[str, float]],
-                                        bench_full_gross_long: pd.Series,
-                                        *,
-                                        direction: str,
-                                        calib_years: int,
-                                        rolling: bool,
-                                        entry_cost: float) -> dict[int, int]:
+
+def df_to_string_centered(df: pd.DataFrame, index: bool = False) -> str:
     """
-    GPS new->prev rank mapping for month dt using:
-      • RLSSA seasonality = the single next-month forecast score at dt (built from prior 10y), direction-aware
-      • Ratio metrics computed on NET returns over calibration window (no look-ahead):
-          rolling=True  -> [dt - calib_years .. dt - 1m]
-          rolling=False -> [FINAL_SIM_START - calib_years .. FINAL_SIM_START - 1m]
-      • IMPORTANT: All ratio metrics are computed vs the SAME long-only, NET benchmark (no direction transform).
-      • GPS_SCORE_COMPONENTS selects which metrics feed the harmonic mean after min–max normalization.
-        Supports aliases below (default TREYNOR → treynor_adj; MDD_RAW uses raw signed MDD where higher=better).
+    Pretty-print a DataFrame with centered columns.
     """
-    # Calibration window
-    if rolling:
-        dt_minus  = dt - relativedelta(years=calib_years)
-        win_start = pd.Timestamp(datetime(dt_minus.year, dt_minus.month, 1))
-        win_end   = dt - pd.offsets.MonthEnd(1)
-    else:
-        fixed_calib_start = pd.Timestamp(datetime(FINAL_SIM_START.year - calib_years, FINAL_SIM_START.month, 1))
-        fixed_calib_end   = FINAL_SIM_START - pd.offsets.MonthEnd(1)
-        win_start, win_end = fixed_calib_start, fixed_calib_end
+    df_str = df.copy()
+    if not index:
+        df_str = df_str.reset_index(drop=True)
+    df_str = df_str.astype(str)
+    cols = list(df_str.columns)
+    rows = df_str.values.tolist()
+    widths = []
+    for i, c in enumerate(cols):
+        col_cells = [r[i] for r in rows] if rows else []
+        widths.append(max(len(str(c)), *(len(x) for x in col_cells)) if col_cells else len(str(c)))
+    header = "  ".join(str(col).center(widths[i]) for i, col in enumerate(cols))
+    body_lines = []
+    for r in rows:
+        body_lines.append("  ".join(str(r[i]).center(widths[i]) for i in range(len(cols))))
+    return header + "\n" + "\n".join(body_lines)
 
-    if win_end < win_start:
-        return {1: 1}
 
-    # Long-only NET benchmark for the window (shared across both directions)
-    bench_win_raw = bench_full_gross_long.loc[(bench_full_gross_long.index >= win_start) & (bench_full_gross_long.index <= win_end)]
-    if bench_win_raw.empty:
-        return {1: 1}
-    bench_win = long_benchmark_net(bench_win_raw, entry_cost)
-
-    # Rankings today + collect returns per prev-rank over the window
-    order_today = rankings.get(dt, [])
-    num_t = len(order_today)
-    if num_t == 0:
-        return {1: 1}
-
-    rets_by_pr: dict[int, list[float]] = defaultdict(list)
-    dates_by_pr: dict[int, list[pd.Timestamp]] = defaultdict(list)
-
-    for d in pd.date_range(win_start, win_end, freq='MS'):
-        order_d = rankings.get(d)
-        if not order_d:
-            continue
-        for pr, tkr in enumerate(order_d, start=1):
-            s = simple_rets_dict.get(tkr)
-            if s is None or d not in s.index:
-                continue
-            r = float(s.loc[d])
-            if direction == 'short':
-                r = (1.0 / (1.0 + r)) - 1.0
-            r_net = (1.0 - entry_cost) * (1.0 + r) - 1.0
-            rets_by_pr[pr].append(r_net)
-            dates_by_pr[pr].append(d)
-
-    # RLSSA seasonality score AT dt (point-in-time; no averaging)
-    s_map_dt = season_score_by_month.get(dt, {})
-
-    rows = []
-    for pr in range(1, num_t + 1):
-        tkr_at_dt = order_today[pr - 1] if pr - 1 < len(order_today) else None
-
-        # RLSSA seasonality score at dt (direction-aware)
-        seasonality_score = np.nan
-        if tkr_at_dt is not None:
-            sval = s_map_dt.get(tkr_at_dt, np.nan)
-            if np.isfinite(sval):
-                seasonality_score = float(-sval) if direction == 'short' else float(sval)
-
-        if pr in rets_by_pr:
-            port = pd.Series(rets_by_pr[pr], index=pd.DatetimeIndex(dates_by_pr[pr]))
-            port = port.loc[(port.index >= win_start) & (port.index <= win_end)].sort_index()
-            sr     = sharpe_ratio(list(port.values))
-            sor    = sortino_ratio(list(port.values))
-            trey_r = treynor_ratio_series(port, bench_win)
-            trey_a = treynor_ratio_series_absbeta(port, bench_win)
-            info   = information_ratio_series(port, bench_win)
-            cal    = calmar_ratio(list(port.values))
-            cum    = float(np.prod(1.0 + port.values) - 1.0) if len(port) else np.nan
-            mer_a  = 12.0 * mean_excess_return_series(port, bench_win)
-            mdd_r  = max_drawdown_from_monthly(port)               # NEGATIVE; higher (closer to 0) is better
-        else:
-            sr = sor = trey_r = trey_a = info = cal = cum = mer_a = mdd_r = np.nan
-
-        rows.append({
-            'prev_rank': pr,
-            'seasonality_score': seasonality_score,
-            'sharpe': sr,
-            'sortino': sor,
-            'treynor_raw': trey_r,
-            'treynor_adj': trey_a,
-            'information': info,
-            'calmar': cal,
-            'cum_ret': cum,
-            'mer_ann': mer_a,
-            'mdd_raw': mdd_r,        # <-- raw (negative) MDD
-        })
-
-    mdf = pd.DataFrame(rows).set_index('prev_rank').sort_index()
-    if mdf.empty:
-        return {1: 1}
-
-    # Alias map (same as SSA script)
-    alias = {
-        'SEASONALITY': 'seasonality_score',
-        'SHARPE': 'sharpe', 'SHARP': 'sharpe',
-        'SORTINO': 'sortino',
-        'CALMAR': 'calmar',
-        'INFORMATION': 'information',
-        'MER_ANN': 'mer_ann',
-        'MDD_RAW': 'mdd_raw', 'MDD': 'mdd_raw', 'MAXDD': 'mdd_raw',
-        'CUM_RET': 'cum_ret',
-
-        # Treynor aliases (default to adjusted):
-        'TREYNOR': 'treynor_adj',
-        'TREYNOR_ADJ': 'treynor_adj',
-        'ADJ_TREYNOR': 'treynor_adj',
-        'TREYNOR_ABS': 'treynor_adj',
-        'TREYNORABS': 'treynor_adj',
-        'TREYNOR_RAW': 'treynor_raw',
-    }
-
-    selected_norm_cols = []
-    for name in GPS_SCORE_COMPONENTS:
-        key = str(name).strip().upper()
-        base = alias.get(key)
-        if not base or base not in mdf.columns:
-            continue
-        norm_col = base + "_01"
-        mdf[norm_col] = minmax_01(mdf[base].values)   # for MDD_RAW (negative), minmax still makes higher=better
-        if np.isfinite(mdf[norm_col].values).any():
-            selected_norm_cols.append(norm_col)
-
-    if not selected_norm_cols:
-        return {1: 1}
-
-    mdf['score'] = [gps_harmonic_01(mdf.loc[i, selected_norm_cols].values) for i in mdf.index]
-
-    # new_rank by descending score → invert to mapping new->prev
-    mdf['new_rank'] = mdf['score'].rank(ascending=False, method='first')
-    inv = {}
-    for prev_rank, row in mdf.iterrows():
-        nr = int(row['new_rank'])
-        if nr not in inv:
-            inv[nr] = int(prev_rank)
-    return inv
-
-def monthly_top1_returns_gps_rlssa(rankings: dict[pd.Timestamp, list[str]],
-                                   simple_rets_dict: dict[str, pd.Series],
-                                   season_score_by_month: dict[pd.Timestamp, dict[str, float]],
-                                   bench_full_gross_long: pd.Series,
-                                   *,
-                                   direction: str,
-                                   start_dt: pd.Timestamp,
-                                   end_dt: pd.Timestamp,
-                                   calib_years: int,
-                                   rolling: bool,
-                                   entry_cost: float,
-                                   return_tickers: bool = False) -> pd.Series | tuple[pd.Series, pd.Series]:
-    """
-    TOP-1 ONLY: GPS maps new_rank=1 to a prev_rank, takes that ticker's NET simple return.
-    If return_tickers=True, also returns a Series of chosen tickers (always recorded),
-    while returns are NaN when the chosen ticker has no return for that month.
-    """
-    out_ret, out_tkr, idx = [], [], []
-    for dt in pd.date_range(start_dt, end_dt, freq='MS'):
-        order_today = rankings.get(dt)
-        if not order_today:
-            continue
-        mapping = compute_gps_mapping_for_month_rlssa(
-            dt, rankings, simple_rets_dict, season_score_by_month, bench_full_gross_long,
-            direction=direction, calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
-            entry_cost=ENTRY_COST
-        )
-        prev_rank = mapping.get(1, 1)
-        if prev_rank < 1 or prev_rank > len(order_today):
-            continue
-        tkr = order_today[prev_rank - 1]
-        out_tkr.append(tkr)
-        s = simple_rets_dict.get(tkr)
-        if s is None or dt not in s.index:
-            r_wc = np.nan
-        else:
-            r = float(s.loc[dt])
-            if direction == 'short':
-                r = (1.0 / (1.0 + r)) - 1.0
-            r_wc = (1.0 - entry_cost) * (1.0 + r) - 1.0
-        out_ret.append(r_wc); idx.append(dt)
-    ret_ser = pd.Series(out_ret, index=idx, name='top1_return_gps')
-    if return_tickers:
-        tkr_ser = pd.Series(out_tkr, index=idx, name='top1_ticker_gps')
-        return ret_ser, tkr_ser
-    return ret_ser
-
-# ---------- Top-5 monthly selection tables (per direction) ---------- #
 def build_monthly_top5_table(df_choices: pd.DataFrame, direction: str, n_runs: int, top_k: int = 5) -> pd.DataFrame:
-    """
-    For each monthly date in the apply window and a given direction,
-    compute the top-k tickers by selection share for Baseline and GPS.
-    Each cell formatted like "[TICKER | 55.7%]" (pct of total simulations).
-    Returns a DataFrame with columns:
-        Date | B1..B5 | G1..G5
-    """
     sub = df_choices[df_choices['direction'] == direction].copy()
     if sub.empty:
-        return pd.DataFrame(columns=['Date'] + [f'B{i}' for i in range(1, top_k+1)] + [f'G{i}' for i in range(1, top_k+1)])
-
+        return pd.DataFrame(
+            columns=['Date'] + [f'C{i}' for i in range(1, top_k + 1)] + [f'R{i}' for i in range(1, top_k + 1)]
+        )
     sub['date'] = pd.to_datetime(sub['date'])
     dates = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
-
     rows = []
     for dt in dates:
         dsel = sub[sub['date'] == dt]
-        base_counts = dsel['baseline_ticker'].value_counts()  # NaNs excluded by default
-        gps_counts  = dsel['gps_ticker'].value_counts()
+        classic_counts = dsel['classic_ticker'].value_counts()
+        risk_counts = dsel['risk_ticker'].value_counts()
 
         def fmt_top(series):
             series = series.head(top_k)
@@ -758,17 +1022,18 @@ def build_monthly_top5_table(df_choices: pd.DataFrame, direction: str, n_runs: i
                 labels.append("")
             return labels
 
-        B = fmt_top(base_counts)
-        G = fmt_top(gps_counts)
+        C = fmt_top(classic_counts)
+        R = fmt_top(risk_counts)
         rows.append({
             'Date': dt.date().isoformat(),
-            **{f'B{i+1}': B[i] for i in range(top_k)},
-            **{f'G{i+1}': G[i] for i in range(top_k)},
+            **{f'C{i + 1}': C[i] for i in range(top_k)},
+            **{f'R{i + 1}': R[i] for i in range(top_k)},
         })
     return pd.DataFrame(rows)
 
+
 # =============================== #
-# 10) METRICS & WINDOWS
+# 9) METRICS & WINDOWS
 # =============================== #
 @dataclass
 class Perf:
@@ -777,292 +1042,404 @@ class Perf:
     sharpe: float
     sortino: float
     calmar: float
-    mdd: float
-    stdev: float   # monthly standard deviation
+    mdd: float   # negative by construction (higher is better)
+    stdev: float # monthly stdev
 
-def cagr_from_monthly(returns: pd.Series) -> float:
-    if returns.empty: return np.nan
-    factor = float(np.prod(1.0 + returns.values))
-    years = len(returns) / 12.0
-    return factor ** (1/years) - 1.0 if years > 0 else np.nan
 
 def perf_from_monthly(returns: pd.Series) -> Perf:
     arr = returns.astype(float).values
     if arr.size == 0:
         return Perf(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-    sr  = sharpe_ratio(arr)       # annualized, full-period
-    sor = sortino_ratio(arr)      # annualized, full-period
-    cal = calmar_ratio(arr)       # full-period
-    cum = float(np.prod(1.0 + arr) - 1.0)  # full-period cumulative return
+    sr = sharpe_ratio(arr)
+    sor = sortino_ratio(arr)
+    cal = calmar_ratio(arr)
+    cum = float(np.prod(1.0 + arr) - 1.0)
     years = len(arr) / 12.0
-    cagr = (np.prod(1.0 + arr) ** (1/years) - 1.0) if years > 0 else np.nan
-    # MDD negative; store as negative; report abs() where displayed
+    cagr = (np.prod(1.0 + arr) ** (1 / years) - 1.0) if years > 0 else np.nan
     cum_curve = np.cumprod(1.0 + arr)
     peak = np.maximum.accumulate(cum_curve)
     dd = cum_curve / peak - 1.0
-    mdd = float(np.min(dd)) if dd.size else np.nan
-    sd  = float(np.std(arr, ddof=1)) if arr.size >= 2 else np.nan  # monthly within-period stdev
+    mdd = float(np.min(dd)) if dd.size else np.nan  # negative
+    sd = float(np.std(arr, ddof=1)) if arr.size >= 2 else np.nan
     return Perf(cum, cagr, sr, sor, cal, mdd, sd)
 
+
 def three_fixed_windows() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Exactly 3x3y windows starting 2016-01 given globals."""
-    wins = []
-    cur = pd.Timestamp(FINAL_SIM_START)
-    for _ in range(3):
-        w_end = cur + relativedelta(months=36) - pd.offsets.MonthEnd(1)
-        wins.append((cur, w_end))
-        cur = w_end + pd.offsets.MonthBegin(1)
+    """
+    Three non-overlapping 3-year windows covering the full apply period:
+    [FINAL_SIM_START .. FINAL_SIM_END], with the final window ending exactly
+    at FINAL_SIM_END (e.g. 2016–2018, 2019–2021, 2022–2024).
+    """
+    wins: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cur_start = pd.Timestamp(FINAL_SIM_START)
+
+    for i in range(3):
+        if i < 2:
+            w_end = cur_start + relativedelta(years=3) - pd.offsets.MonthEnd(1)
+        else:
+            w_end = pd.Timestamp(FINAL_SIM_END)
+        wins.append((cur_start, w_end))
+        cur_start = w_end + pd.offsets.MonthBegin(1)
+
     return wins
 
-# =============================== #
-# 11) SIGNIFICANCE HELPERS (paired, one-sided both directions at α/2)
-# =============================== #
-def paired_one_sided_both(left: np.ndarray, right: np.ndarray):
+
+def compute_metrics_correlation(df_metrics: pd.DataFrame,
+                                metric_cols: list[str]) -> pd.DataFrame:
     """
-    Returns (t_right>left, p_right>left, t_right<left, p_right<left, n_valid)
-    using paired one-sided t-tests on matched pairs.
+    Safe correlation: drops metric columns with < 2 finite observations.
+    """
+    m = df_metrics[metric_cols].astype(float)
+
+    valid_cols = [c for c in metric_cols if np.isfinite(m[c]).sum() >= 2]
+    if len(valid_cols) < 2:
+        return pd.DataFrame()
+
+    m = m[valid_cols]
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        corr = m.corr(method='pearson')
+
+    return corr
+
+
+def save_correlation_csv(corr_df: pd.DataFrame, out_path: Path) -> None:
+    corr_df.to_csv(out_path)
+
+
+def save_correlation_heatmap(corr_df: pd.DataFrame, out_path_pdf: Path) -> None:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(corr_df.values, vmin=-1, vmax=1, cmap='coolwarm')
+    metric_cols = list(corr_df.columns)
+    ax.set_xticks(range(len(metric_cols)))
+    ax.set_yticks(range(len(metric_cols)))
+    ax.set_xticklabels(metric_cols, rotation=45, ha='right')
+    ax.set_yticklabels(metric_cols)
+    for i in range(len(metric_cols)):
+        for j in range(len(metric_cols)):
+            val = corr_df.values[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:.2f}", ha='center', va='center', fontsize=8)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_title("Correlation of Performance Metrics")
+    fig.tight_layout()
+    fig.savefig(out_path_pdf)
+    plt.close(fig)
+
+
+def paired_two_sided(left: np.ndarray, right: np.ndarray):
+    """
+    Paired two-sided t-test: tests H0: mean(right - left) = 0.
+    Returns (t, p_two_sided, n).
     """
     mask = np.isfinite(left) & np.isfinite(right)
     n = int(mask.sum())
     if n < 3:
-        return None, None, None, None, n
-    t_g, p_g = st.ttest_rel(right[mask], left[mask], alternative='greater')
-    t_l, p_l = st.ttest_rel(right[mask], left[mask], alternative='less')
-    return float(t_g), float(p_g), float(t_l), float(p_l), n
+        return None, None, n
+    t, p = st.ttest_rel(right[mask], left[mask], alternative='two-sided')
+    return float(t), float(p), n
 
-# ---- Compact significance table formatting ----
-def _fmt(x, nd=3):
-    if x is None or (isinstance(x, float) and not np.isfinite(x)):
-        return ""
-    return f"{x:.{nd}f}"
 
-def _fmt_p(p, alpha=PER_SIDE_ALPHA):
-    if p is None or not np.isfinite(p):
-        return ""
-    star = "*" if p < alpha else ""
-    return f"{p:.4f}{star}"
+def one_sample_two_sided(x: np.ndarray, popmean: float = 0.0):
+    """
+    One-sample two-sided t-test: tests H0: mean(x) = popmean.
+    Returns (t, p_two_sided, n).
+    """
+    x = np.asarray(x, dtype=float)
+    mask = np.isfinite(x)
+    x = x[mask]
+    n = int(x.size)
+    if n < 3:
+        return None, None, n
+    t, p = st.ttest_1samp(x, popmean, alternative='two-sided')
+    return float(t), float(p), n
 
-def _sig_conclusion(p_g, p_l, left_label, right_label, alpha=PER_SIDE_ALPHA):
-    g_sig = (p_g is not None and np.isfinite(p_g) and p_g < alpha)
-    l_sig = (p_l is not None and np.isfinite(p_l) and p_l < alpha)
-    if g_sig and not l_sig:
-        return f"{right_label} > {left_label}"
-    if l_sig and not g_sig:
-        return f"{left_label} > {right_label}"
-    if not g_sig and not l_sig:
-        return "ns"
-    return "conflict"
+
+def print_sig_line_generic(metric_name: str,
+                           left_label: str, right_label: str,
+                           t, p, n: int):
+    if n < 3:
+        print(f"    {right_label} vs {left_label} — {metric_name:<11}: insufficient valid pairs.")
+        return
+    concl = _sig_conclusion(t, p, left_label, right_label, alpha=SIGNIF_TWO_SIDED_ALPHA)
+    print(f"    {right_label} vs {left_label} — {metric_name:<11}: "
+          f"n={n:4d} | t={_fmt(t):>6} | p(two-sided)={_fmt_p(p, SIGNIF_TWO_SIDED_ALPHA):>8} -> {concl}")
+
 
 # =============================== #
-# 12) MONTE CARLO: BOTH DIRECTIONS (long-benchmark ratios; weighted only LONG)
+# 10) MONTE CARLO: CLASSIC VS RISK (RLSSA)
 # =============================== #
-def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
+def run_monte_carlo_both(n_runs=MC_RUNS, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE):
     OUT_DIR_MC.mkdir(parents=True, exist_ok=True)
+    corr_dir = OUT_DIR_MC / "correlation_matrices"
+    corr_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- Tee prints to console AND buffer; write buffer to file at end
     buf = io.StringIO()
 
     class Tee(io.TextIOBase):
-        def __init__(self, *streams): self.streams = streams
+        def __init__(self, *streams):
+            self.streams = streams
+
         def write(self, s):
-            for st_ in self.streams: st_.write(s)
+            for st_ in self.streams:
+                st_.write(s)
             return len(s)
+
         def flush(self):
             for st_ in self.streams:
-                try: st_.flush()
-                except Exception: pass
+                try:
+                    st_.flush()
+                except Exception:
+                    pass
 
     tee = Tee(sys.__stdout__, buf)
 
-    # Unified metrics table + selection records
     metrics_rows: list[dict] = []
     choice_records = []
 
     with redirect_stdout(tee):
         rng = np.random.default_rng(RNG_SEED)
         t0 = time.time()
+        section(
+            f"Starting Monte Carlo (MEB) — BOTH directions (classic vs risk-adjusted RLSSA) | "
+            f"runs={n_runs:,} | zero_noise={zero_noise}"
+        )
 
-        section(f"Starting Monte Carlo — RLSSA (BOTH directions) | runs={n_runs:,} | λ={lam} | zero_noise={zero_noise}")
-        print(f"Ranking: RLSSA(L={SSA_WINDOW}, q={SSA_COMPS}, scale={'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'})")
-        print(f"Windows: Lookback={LOOKBACK_YEARS}y | Test={SIM_YEARS}y ({TEST_SIM_START.date()}→{TEST_SIM_END.date()}) | "
-              f"Apply={FINAL_SIM_START.date()}→{FINAL_SIM_END.date()}")
-        print(f"GPS: rolling={GPS_ROLLING_ENABLED}, calib={GPS_CALIB_YEARS}y | Entry cost per month={ENTRY_COST:.4f}\n")
-
-        # Precompute sigma projections once (used only if zero_noise=False)
-        sigma_proj = None if zero_noise else precompute_sigma_proj_for_all(log_rets, lam=lam)
-
-        # Static grids
         month_grid = pd.date_range(FINAL_SIM_START, FINAL_SIM_END, freq='MS')
         splits = three_fixed_windows()
 
-        # Strategies per direction (weighted only on LONG)
-        STRATS_BY_DIR = {'long': ('baseline','gps','weighted'), 'short': ('baseline','gps')}
+        STRATS_BY_DIR = {
+            'long': ('classic', 'risk', 'weighted'),
+            'short': ('classic', 'risk')
+        }
 
         full_metrics = {
-            'long':  {'baseline': [], 'gps': [], 'weighted': []},
-            'short': {'baseline': [], 'gps': []}
+            'long': {'classic': [], 'risk': [], 'weighted': []},
+            'short': {'classic': [], 'risk': []}
         }
         sub_metrics = {
-            'long':  {'baseline': defaultdict(list), 'gps': defaultdict(list), 'weighted': defaultdict(list)},
-            'short': {'baseline': defaultdict(list), 'gps': defaultdict(list)}
+            'long': {'classic': defaultdict(list),
+                     'risk': defaultdict(list),
+                     'weighted': defaultdict(list)},
+            'short': {'classic': defaultdict(list),
+                      'risk': defaultdict(list)}
         }
-        sub_treynor_adj = {
-            'long':  {'baseline': defaultdict(list), 'gps': defaultdict(list), 'weighted': defaultdict(list)},
-            'short': {'baseline': defaultdict(list), 'gps': defaultdict(list)}
+        pos_counts = {
+            'long': {'classic': 0, 'risk': 0, 'weighted': 0},
+            'short': {'classic': 0, 'risk': 0}
         }
-        pos_counts = {'long': {'baseline':0,'gps':0,'weighted':0}, 'short': {'baseline':0,'gps':0}}
-        neg_counts = {'long': {'baseline':0,'gps':0,'weighted':0}, 'short': {'baseline':0,'gps':0}}
+        neg_counts = {
+            'long': {'classic': 0, 'risk': 0, 'weighted': 0},
+            'short': {'classic': 0, 'risk': 0}
+        }
 
-        # MAIN LOOP
         for run in range(1, n_runs + 1):
-            # 1) simulate log returns (or reuse base logs) and convert to simple
-            log_sim = simulate_log_returns_with_sigma(log_rets, sigma_proj, lam=lam, rng=rng, no_noise=zero_noise)
-            simple_sim = log_to_simple_dict(log_sim) if not zero_noise else log_to_simple_dict(log_rets)
+            # 1) simulate log returns (MEB)
+            simple_sim, log_sim = generate_simulated_simple_returns_for_run(
+                rng, zero_noise
+            )
 
-            # 2) build RLSSA rankings & per-month seasonality scores
-            L_rank, S_rank, season_by_month = build_rlssa_rankings_from_log_rets(log_sim, simple_sim, LOOKBACK_YEARS)
+            # 2) classic vs risk-adjusted log returns
+            log_sim_classic = log_sim
+            log_sim_risk = build_risk_adjusted_log_dict(
+                log_sim, lam=EWMA_LAMBDA, lookback_years=LOOKBACK_YEARS
+            )
 
-            # 3) equal-weight benchmarks (gross long) for test+apply (full) and apply (window)
-            bench_full_gross_long  = build_equal_weight_benchmark(simple_sim, TEST_SIM_START,  FINAL_END)
-            bench_apply_gross_long = build_equal_weight_benchmark(simple_sim, FINAL_SIM_START, FINAL_SIM_END)
+            # 3) RLSSA rankings (parallelised with internal month progress)
+            L_rank_classic, S_rank_classic = build_rankings_from_log_rets(
+                log_sim_classic, LOOKBACK_YEARS
+            )
+            L_rank_risk, S_rank_risk = build_rankings_from_log_rets(
+                log_sim_risk, LOOKBACK_YEARS
+            )
 
-            # 4) common NET long-only benchmark for ratio metrics (used for ALL Treynor/IR/MER)
-            bench_apply_long_net = long_benchmark_net(bench_apply_gross_long, ENTRY_COST)
+            # 4) Long-only EW benchmarks (gross long) on apply window
+            bench_apply_gross_long = build_equal_weight_benchmark(
+                simple_sim, FINAL_SIM_START, FINAL_SIM_END
+            )
+            bench_apply_long_net = long_benchmark_net(
+                bench_apply_gross_long, TRADING_COST
+            )
 
-            # Weighted = equal-weight long-only NET (LONG direction only)
             weighted_long_series = bench_apply_long_net.copy().rename("equal_weight_long_net")
 
-            # 5) iterate BOTH directions using shared computations
-            for direction, rank_use in (('long', L_rank), ('short', S_rank)):
-                # Baseline + GPS top-1 series (NET)
-                top1_baseline, tkr_baseline = monthly_top1_returns(
-                    rank_use, simple_sim, direction=direction,
+            for direction in ('long', 'short'):
+                if direction == 'long':
+                    rank_classic = L_rank_classic
+                    rank_risk = L_rank_risk
+                else:
+                    rank_classic = S_rank_classic
+                    rank_risk = S_rank_risk
+
+                # Top-1 Classic & Risk (NET) with direction-aware P&L
+                top1_classic, tkr_classic = monthly_top1_returns(
+                    rank_classic, simple_sim, direction=direction,
                     start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-                    entry_cost=ENTRY_COST, return_tickers=True
+                    entry_cost=TRADING_COST, return_tickers=True
                 )
-                top1_gps, tkr_gps = monthly_top1_returns_gps_rlssa(
-                    rank_use, simple_sim, season_by_month, bench_full_gross_long,
-                    direction=direction,
+                top1_risk, tkr_risk = monthly_top1_returns(
+                    rank_risk, simple_sim, direction=direction,
                     start_dt=FINAL_SIM_START, end_dt=FINAL_SIM_END,
-                    calib_years=GPS_CALIB_YEARS, rolling=GPS_ROLLING_ENABLED,
-                    entry_cost=ENTRY_COST, return_tickers=True
+                    entry_cost=TRADING_COST, return_tickers=True
                 )
 
-                # NAV series (for context of Top-1 only)
-                nav_baseline = nav_from_returns_on_grid(top1_baseline, START_VALUE, month_grid)
-                nav_gps      = nav_from_returns_on_grid(top1_gps,      START_VALUE, month_grid)
+                # NAVs (Top-1 only)
+                nav_classic = nav_from_returns_on_grid(
+                    top1_classic, START_VALUE, month_grid
+                )
+                nav_risk = nav_from_returns_on_grid(
+                    top1_risk, START_VALUE, month_grid
+                )
 
-                # Record choices for ALL months (for Top-5 aggregation)
+                # Record choices
                 for dt in month_grid:
                     choice_records.append({
                         'direction': direction,
                         'run': run,
                         'date': dt.date().isoformat(),
-                        'baseline_ticker': tkr_baseline.get(dt, np.nan) if not tkr_baseline.empty else np.nan,
-                        'gps_ticker': tkr_gps.get(dt, np.nan) if not tkr_gps.empty else np.nan,
-                        'baseline_value': float(nav_baseline.get(dt, np.nan)),
-                        'gps_value': float(nav_gps.get(dt, np.nan)),
+                        'classic_ticker': tkr_classic.get(dt, np.nan)
+                        if not tkr_classic.empty else np.nan,
+                        'risk_ticker': tkr_risk.get(dt, np.nan)
+                        if not tkr_risk.empty else np.nan,
+                        'classic_value': float(nav_classic.get(dt, np.nan)),
+                        'risk_value': float(nav_risk.get(dt, np.nan)),
                     })
 
-                # Optional per-run series (per direction)
+                # Save series
                 if save_series:
                     ddir = OUT_DIR_MC / f"{direction}_run_{run:03d}"
                     ddir.mkdir(parents=True, exist_ok=True)
-                    top1_baseline.to_csv(ddir / "top1_baseline_monthly.csv")
-                    top1_gps.to_csv(ddir / "top1_gps_monthly.csv")
+                    top1_classic.to_csv(ddir / "top1_classic_monthly.csv")
+                    top1_risk.to_csv(ddir / "top1_risk_monthly.csv")
                     if direction == 'long':
-                        weighted_long_series.to_csv(ddir / "weighted_equal_monthly.csv")
+                        weighted_long_series.to_csv(
+                            ddir / "weighted_equal_monthly.csv"
+                        )
 
-                # Full-period metrics (apply window) — port-only stats; Treynor/IR/MER vs long-only NET benchmark
-                pb = perf_from_monthly(top1_baseline)
-                pg = perf_from_monthly(top1_gps)
-                full_metrics[direction]['baseline'].append(pb)
-                full_metrics[direction]['gps'].append(pg)
-                pos_counts[direction]['baseline'] += int(pb.cum_ret > 0)
-                neg_counts[direction]['baseline'] += int(pb.cum_ret <= 0)
-                pos_counts[direction]['gps']      += int(pg.cum_ret > 0)
-                neg_counts[direction]['gps']      += int(pg.cum_ret <= 0)
+                # Full-period metrics
+                pc = perf_from_monthly(top1_classic)
+                pr = perf_from_monthly(top1_risk)
+                full_metrics[direction]['classic'].append(pc)
+                full_metrics[direction]['risk'].append(pr)
+                pos_counts[direction]['classic'] += int(pc.cum_ret > 0)
+                neg_counts[direction]['classic'] += int(pc.cum_ret <= 0)
+                pos_counts[direction]['risk'] += int(pr.cum_ret > 0)
+                neg_counts[direction]['risk'] += int(pr.cum_ret <= 0)
 
-                # Add 'weighted' only for LONG direction
                 if direction == 'long':
                     pw = perf_from_monthly(weighted_long_series)
                     full_metrics['long']['weighted'].append(pw)
                     pos_counts['long']['weighted'] += int(pw.cum_ret > 0)
                     neg_counts['long']['weighted'] += int(pw.cum_ret <= 0)
 
-                # ---- Rows for CSV (save raw & adjusted Treynor; keep both mdd_raw and mdd_mag)
+                # Metrics rows for correlation / CSV
                 metrics_rows.append({
-                    'run': run, 'direction': direction, 'strategy': 'baseline',
-                    'sharpe': pb.sharpe, 'sortino': pb.sortino,
-                    'treynor_adj': treynor_ratio_series_absbeta(top1_baseline, bench_apply_long_net),
-                    'treynor_raw': treynor_ratio_series(top1_baseline, bench_apply_long_net),
-                    'information': information_ratio_series(top1_baseline, bench_apply_long_net),
-                    'calmar': pb.calmar, 'cum_ret': pb.cum_ret,
-                    'mdd_raw': pb.mdd if np.isfinite(pb.mdd) else np.nan,
-                    'mdd_mag': abs(pb.mdd) if np.isfinite(pb.mdd) else np.nan,
-                    'mer_m': mean_excess_return_series(top1_baseline, bench_apply_long_net),
+                    'run': run, 'direction': direction, 'strategy': 'classic',
+                    'sharpe': pc.sharpe, 'sortino': pc.sortino,
+                    'treynor': treynor_ratio_series_absbeta(
+                        top1_classic, bench_apply_long_net
+                    ),
+                    'treynor_raw': treynor_ratio_series(
+                        top1_classic, bench_apply_long_net
+                    ),
+                    'information': information_ratio_series(
+                        top1_classic, bench_apply_long_net
+                    ),
+                    'calmar': pc.calmar, 'cum_ret': pc.cum_ret,
+                    'mdd': pc.mdd if np.isfinite(pc.mdd) else np.nan,
+                    'mdd_mag': abs(pc.mdd) if np.isfinite(pc.mdd) else np.nan,
+                    'excess_ret_m': mean_excess_return_series(
+                        top1_classic, bench_apply_long_net
+                    ),
                 })
                 metrics_rows.append({
-                    'run': run, 'direction': direction, 'strategy': 'gps',
-                    'sharpe': pg.sharpe, 'sortino': pg.sortino,
-                    'treynor_adj': treynor_ratio_series_absbeta(top1_gps, bench_apply_long_net),
-                    'treynor_raw': treynor_ratio_series(top1_gps, bench_apply_long_net),
-                    'information': information_ratio_series(top1_gps, bench_apply_long_net),
-                    'calmar': pg.calmar, 'cum_ret': pg.cum_ret,
-                    'mdd_raw': pg.mdd if np.isfinite(pg.mdd) else np.nan,
-                    'mdd_mag': abs(pg.mdd) if np.isfinite(pg.mdd) else np.nan,
-                    'mer_m': mean_excess_return_series(top1_gps, bench_apply_long_net),
+                    'run': run, 'direction': direction, 'strategy': 'risk',
+                    'sharpe': pr.sharpe, 'sortino': pr.sortino,
+                    'treynor': treynor_ratio_series_absbeta(
+                        top1_risk, bench_apply_long_net
+                    ),
+                    'treynor_raw': treynor_ratio_series(
+                        top1_risk, bench_apply_long_net
+                    ),
+                    'information': information_ratio_series(
+                        top1_risk, bench_apply_long_net
+                    ),
+                    'calmar': pr.calmar, 'cum_ret': pr.cum_ret,
+                    'mdd': pr.mdd if np.isfinite(pr.mdd) else np.nan,
+                    'mdd_mag': abs(pr.mdd) if np.isfinite(pr.mdd) else np.nan,
+                    'excess_ret_m': mean_excess_return_series(
+                        top1_risk, bench_apply_long_net
+                    ),
                 })
                 if direction == 'long':
                     metrics_rows.append({
                         'run': run, 'direction': 'long', 'strategy': 'weighted',
                         'sharpe': pw.sharpe, 'sortino': pw.sortino,
-                        'treynor_adj': treynor_ratio_series_absbeta(weighted_long_series, bench_apply_long_net),
-                        'treynor_raw': treynor_ratio_series(weighted_long_series, bench_apply_long_net),
-                        'information': information_ratio_series(weighted_long_series, bench_apply_long_net),
+                        'treynor': treynor_ratio_series_absbeta(
+                            weighted_long_series, bench_apply_long_net
+                        ),
+                        'treynor_raw': treynor_ratio_series(
+                            weighted_long_series, bench_apply_long_net
+                        ),
+                        'information': information_ratio_series(
+                            weighted_long_series, bench_apply_long_net
+                        ),
                         'calmar': pw.calmar, 'cum_ret': pw.cum_ret,
-                        'mdd_raw': pw.mdd if np.isfinite(pw.mdd) else np.nan,
+                        'mdd': pw.mdd if np.isfinite(pw.mdd) else np.nan,
                         'mdd_mag': abs(pw.mdd) if np.isfinite(pw.mdd) else np.nan,
-                        'mer_m': mean_excess_return_series(weighted_long_series, bench_apply_long_net),
+                        'excess_ret_m': mean_excess_return_series(
+                            weighted_long_series, bench_apply_long_net
+                        ),
                     })
 
-                # ---- Subperiods (three 3y windows) + Adjusted Treynor vs long-only benchmark
+                # Subperiods (three 3y windows)
                 for i, (s, e) in enumerate(splits, start=1):
-                    sb = top1_baseline[(top1_baseline.index >= s) & (top1_baseline.index <= e)]
-                    sg = top1_gps[(top1_gps.index >= s) & (top1_gps.index <= e)]
-                    sub_metrics[direction]['baseline'][i].append(perf_from_monthly(sb))
-                    sub_metrics[direction]['gps'][i].append(perf_from_monthly(sg))
-
-                    bench_win = bench_apply_long_net[(bench_apply_long_net.index >= s) & (bench_apply_long_net.index <= e)]
-                    sub_treynor_adj[direction]['baseline'][i].append(treynor_ratio_series_absbeta(sb, bench_win))
-                    sub_treynor_adj[direction]['gps'][i].append(treynor_ratio_series_absbeta(sg, bench_win))
+                    sc = top1_classic[
+                        (top1_classic.index >= s) & (top1_classic.index <= e)
+                    ]
+                    sr_ = top1_risk[
+                        (top1_risk.index >= s) & (top1_risk.index <= e)
+                    ]
+                    sub_metrics[direction]['classic'][i].append(
+                        perf_from_monthly(sc)
+                    )
+                    sub_metrics[direction]['risk'][i].append(
+                        perf_from_monthly(sr_)
+                    )
 
                     if direction == 'long':
-                        sw = weighted_long_series[(weighted_long_series.index >= s) & (weighted_long_series.index <= e)]
-                        sub_metrics['long']['weighted'][i].append(perf_from_monthly(sw))
-                        sub_treynor_adj['long']['weighted'][i].append(treynor_ratio_series_absbeta(sw, bench_win))
+                        sw = weighted_long_series[
+                            (weighted_long_series.index >= s)
+                            & (weighted_long_series.index <= e)
+                        ]
+                        sub_metrics['long']['weighted'][i].append(
+                            perf_from_monthly(sw)
+                        )
 
-            # progress
-            if (run % 10) == 0:
+            if (run % 1) == 0:
                 elapsed = time.time() - t0
-                print(f"  Progress: completed {run:>4}/{n_runs:<4} runs | elapsed {time.strftime('%H:%M:%S', time.gmtime(elapsed))}")
+                print(
+                    f"  Progress: completed {run:>4}/{n_runs:<4} runs | "
+                    f"elapsed {time.strftime('%H:%M:%S', time.gmtime(elapsed))}"
+                )
 
-        # === Build & save the Top-5 selection-share tables (per direction) ===
+        # === Top-5 selection tables ===
         if SAVE_TICKER_CHOICES_CSV and choice_records:
             df_choices = pd.DataFrame(choice_records)
-
             section("Top-5 selection share tables (per month)")
-
             for direction in ('long', 'short'):
                 tbl = build_monthly_top5_table(df_choices, direction, n_runs, top_k=5)
                 out_path = OUT_DIR_MC / f"top5_selections_table_{direction}.csv"
                 tbl.to_csv(out_path, index=False)
-
-                print(f"Direction: {direction.upper()} — Top-5 per method (Baseline first 5 columns, GPS next 5)")
+                print(
+                    f"Direction: {direction.upper()} — Top-5 per method "
+                    f"(Classic first 5 columns, Risk-adjusted next 5)"
+                )
                 print(df_to_string_centered(tbl.head(12), index=False) + "\n")
                 print(f"Saved full table to: {out_path}\n")
 
-        # === Safe aggregators to avoid warnings (empty/all-NaN) ===
+        # === Safe stats helpers ===
         def _finite(x) -> np.ndarray:
             arr = np.asarray(x, dtype=float)
             return arr[np.isfinite(arr)]
@@ -1081,238 +1458,303 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
 
         def agg(perf_list: list[Perf]) -> dict[str, float]:
             if not perf_list:
-                keys = ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']
-                return {f"{k}_mean": np.nan for k in keys} | \
-                       {f"{k}_median": np.nan for k in keys} | \
-                       {f"{k}_std": np.nan for k in keys}
+                keys = ['cum_ret', 'cagr', 'sharpe',
+                        'sortino', 'calmar', 'mdd', 'stdev']
+                return ({f"{k}_mean": np.nan for k in keys}
+                        | {f"{k}_median": np.nan for k in keys}
+                        | {f"{k}_std": np.nan for k in keys})
             out = {}
-            for k in ['cum_ret','cagr','sharpe','sortino','calmar','mdd','stdev']:
+            for k in ['cum_ret', 'cagr', 'sharpe',
+                      'sortino', 'calmar', 'mdd', 'stdev']:
                 x = np.array([getattr(p, k) for p in perf_list], dtype=float)
-                out[f'{k}_mean']   = safe_mean(x)
+                out[f'{k}_mean'] = safe_mean(x)
                 out[f'{k}_median'] = safe_median(x)
-                out[f'{k}_std']    = safe_std(x, ddof=1)
+                out[f'{k}_std'] = safe_std(x, ddof=1)
             return out
-
-        def treynor_stats_from_df(df: pd.DataFrame, direction: str, strategy: str) -> dict[str, float]:
-            sub = df[(df['direction'] == direction) & (df['strategy'] == strategy)]
-            vals = sub['treynor_adj'].astype(float).values if not sub.empty else np.array([], dtype=float)
-            return {
-                'treynor_mean': safe_mean(vals),
-                'treynor_median': safe_median(vals),
-                'treynor_std': safe_std(vals, ddof=1)
-            }
 
         df_metrics_all = pd.DataFrame(metrics_rows) if metrics_rows else None
 
-        # === Print LONG then SHORT
+        # === Print LONG then SHORT summaries, subperiods & significance
         for direction in ('long', 'short'):
             n_runs_local = n_runs
             strats = STRATS_BY_DIR[direction]
 
             # Aggregates
             agg_full = {s: agg(full_metrics[direction][s]) for s in strats}
-            trey     = {s: (treynor_stats_from_df(df_metrics_all, direction, s) if df_metrics_all is not None else {}) for s in strats}
 
             section(f"MONTE CARLO SUMMARY — Direction: {direction.upper()}")
 
-            print(f"Config")
+            print("Config")
             print(f"  Lookback: {LOOKBACK_YEARS}y")
-            print(f"  Test    : {TEST_SIM_START.date()} → {TEST_SIM_END.date()}  ({SIM_YEARS}y)")
-            print(f"  Apply   : {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}")
-            print(f"  RLSSA   : L={SSA_WINDOW}, q={SSA_COMPS}, scale={'EWMA' if RLSSA_USE_EWMA_SCALE else 'Raw'}   | GPS rolling={GPS_ROLLING_ENABLED}, calib={GPS_CALIB_YEARS}y   | Entry cost={ENTRY_COST:.4f}\n")
+            print(
+                f"  Apply   : {FINAL_SIM_START.date()} → {FINAL_SIM_END.date()}"
+            )
+            print(
+                f"  Entry cost={TRADING_COST:.4f}"
+            )
+            print(f"  EWMA λ  : {EWMA_LAMBDA}\n")
 
             # Outcome counts
             print("Outcome counts (Top-1 over apply)")
-            hdr = f"  {'Strategy':<10} {'Pos(+)':>7} {'Neg(-)':>7}"
+            hdr = f"  {'Strategy':<12} {'Pos(+)':>7} {'Neg(-)':>7}"
             print(hdr)
-            print(f"  {'-'*10} {'-'*7:>7} {'-'*7:>7}")
-            print(f"  {'Baseline':<10} {pos_counts[direction]['baseline']:>7} {neg_counts[direction]['baseline']:>7}")
-            print(f"  {'GPS':<5}      {pos_counts[direction]['gps']:>7} {neg_counts[direction]['gps']:>7}")
+            print(f"  {'-' * 12} {'-' * 7:>7} {'-' * 7:>7}")
+            print(
+                f"  {'Classic':<12} {pos_counts[direction]['classic']:>7} "
+                f"{neg_counts[direction]['classic']:>7}"
+            )
+            print(
+                f"  {'Risk-adj':<12} {pos_counts[direction]['risk']:>7} "
+                f"{neg_counts[direction]['risk']:>7}"
+            )
             if 'weighted' in strats:
-                print(f"  {'Weighted':<10} {pos_counts[direction]['weighted']:>7} {neg_counts[direction]['weighted']:>7}")
+                print(
+                    f"  {'Weighted':<12} {pos_counts[direction]['weighted']:>7} "
+                    f"{neg_counts[direction]['weighted']:>7}"
+                )
             print("")
 
-            def pretty_full(d, t, name):
-                print(f"{name} — Full Apply Period (across {n_runs_local} runs)")
-                print(f"  CumRet      mean={d['cum_ret_mean']:.4f}   median={d['cum_ret_median']:.4f}   sd={d['cum_ret_std']:.4f}")
-                print(f"  CAGR        mean={d['cagr_mean']:.4f}     median={d['cagr_median']:.4f}     sd={d['cagr_std']:.4f}")
-                print(f"  Sharpe      mean={d['sharpe_mean']:.3f}   median={d['sharpe_median']:.3f}   sd={d['sharpe_std']:.3f}")
-                print(f"  Sortino     mean={d['sortino_mean']:.3f}  median={d['sortino_median']:.3f}  sd={d['sortino_std']:.3f}")
-                print(f"  Calmar      mean={d['calmar_mean']:.3f}   median={d['calmar_median']:.3f}   sd={d['calmar_std']:.3f}")
-                print(f"  MaxDD       mean={d['mdd_mean']:.3f}      median={d['mdd_median']:.3f}      sd={d['mdd_std']:.3f}")
-                print(f"  AdjTreynor  mean={t.get('treynor_mean', np.nan):.3f}   median={t.get('treynor_median', np.nan):.3f}   sd={t.get('treynor_std', np.nan):.3f}\n")
+            # ========= Full-period summary tables =========
+            def pretty_full(d, name):
+                print(
+                    f"{name} — Full Apply Period (across {n_runs_local} runs)"
+                )
 
-            pretty_full(agg_full['baseline'], trey['baseline'], "BASELINE")
-            pretty_full(agg_full['gps'],      trey['gps'],      "GPS")
+                def fmt4(v):
+                    return "" if v is None or not np.isfinite(v) else f"{v:.4f}"
+
+                def fmt3(v):
+                    return "" if v is None or not np.isfinite(v) else f"{v:.3f}"
+
+                rows = []
+                # Return, CAGR, Sharpe, MDD
+                rows.append({
+                    "Metric": "Return",
+                    "Mean": fmt4(d['cum_ret_mean']),
+                    "Median": fmt4(d['cum_ret_median']),
+                    "SD": fmt4(d['cum_ret_std']),
+                })
+                rows.append({
+                    "Metric": "CAGR",
+                    "Mean": fmt4(d['cagr_mean']),
+                    "Median": fmt4(d['cagr_median']),
+                    "SD": fmt4(d['cagr_std']),
+                })
+                rows.append({
+                    "Metric": "Sharpe",
+                    "Mean": fmt3(d['sharpe_mean']),
+                    "Median": fmt3(d['sharpe_median']),
+                    "SD": fmt3(d['sharpe_std']),
+                })
+                rows.append({
+                    "Metric": "MDD",
+                    "Mean": fmt3(d['mdd_mean']),
+                    "Median": fmt3(d['mdd_median']),
+                    "SD": fmt3(d['mdd_std']),
+                })
+
+                df_tab = pd.DataFrame(rows, columns=["Metric", "Mean", "Median", "SD"])
+                print(df_to_string_centered(df_tab, index=False))
+                print("")
+
+            pretty_full(agg_full['classic'], "CLASSIC")
+            pretty_full(agg_full['risk'], "RISK-ADJUSTED")
             if 'weighted' in strats:
-                pretty_full(agg_full['weighted'], trey['weighted'], "WEIGHTED")
+                pretty_full(agg_full['weighted'], "WEIGHTED")
 
+            # ========= Subperiods — Three fixed 3-year windows =========
             print("Subperiods — Three fixed 3-year windows")
             for i, (s, e) in enumerate(splits, start=1):
-                ab = agg(sub_metrics[direction]['baseline'][i])
-                ag = agg(sub_metrics[direction]['gps'][i])
-                tb_arr = np.array(sub_treynor_adj[direction]['baseline'][i], dtype=float)
-                tg_arr = np.array(sub_treynor_adj[direction]['gps'][i], dtype=float)
-                tb_mean = safe_mean(tb_arr); tg_mean = safe_mean(tg_arr)
+                ac = agg(sub_metrics[direction]['classic'][i])
+                ar = agg(sub_metrics[direction]['risk'][i])
 
                 print(f"\n  Window {i}: {s.date()} → {e.date()}")
-                if 'weighted' not in strats:
-                    print(f"    {'Metric':<14} {'Baseline':>12} {'GPS':>12}")
-                    print(f"    {'-'*14:<14} {'-'*12:>12} {'-'*12:>12}")
-                    def line2(label, f, g, fmt=".4f"):
-                        def fmt1(x): return ("{:"+fmt+"}").format(float(x)) if np.isfinite(x) else "nan"
-                        print(f"    {label:<14} {fmt1(f):>12} {fmt1(g):>12}")
-                    line2("CumRet mean",  ab['cum_ret_mean'],  ag['cum_ret_mean'])
-                    line2("CAGR mean",    ab['cagr_mean'],     ag['cagr_mean'])
-                    line2("Sharpe mean",  ab['sharpe_mean'],   ag['sharpe_mean'], fmt=".3f")
-                    line2("Calmar mean",  ab['calmar_mean'],   ag['calmar_mean'], fmt=".3f")
-                    line2("MaxDD mean",   ab['mdd_mean'],      ag['mdd_mean'],    fmt=".3f")
-                    print(f"    {'AdjTreynor mean':<14} {tb_mean:>12.3f} {tg_mean:>12.3f}")
+                if direction == 'short':
+                    print(
+                        f"    {'Metric':<14} {'Classic':>12} {'Risk-adj':>12}"
+                    )
+                    print(
+                        f"    {'-' * 14:<14} {'-' * 12:>12} {'-' * 12:>12}"
+                    )
+
+                    def line2(label, fval, gval, fmt=".4f"):
+                        def fmt1(x):
+                            return ("{:" + fmt + "}").format(float(x)) if np.isfinite(x) else "nan"
+                        print(
+                            f"    {label:<14} {fmt1(fval):>12} {fmt1(gval):>12}"
+                        )
+
+                    line2("Return mean", ac['cum_ret_mean'], ar['cum_ret_mean'])
+                    line2("CAGR mean", ac['cagr_mean'], ar['cagr_mean'])
+                    line2("Sharpe mean", ac['sharpe_mean'], ar['sharpe_mean'], fmt=".3f")
+                    line2("MDD mean", ac['mdd_mean'], ar['mdd_mean'], fmt=".3f")
                 else:
                     aw = agg(sub_metrics['long']['weighted'][i])
-                    tw_arr = np.array(sub_treynor_adj['long']['weighted'][i], dtype=float)
-                    tw_mean = safe_mean(tw_arr)
-                    print(f"    {'Metric':<14} {'Baseline':>12} {'GPS':>12} {'Weighted':>12}")
-                    print(f"    {'-'*14:<14} {'-'*12:>12} {'-'*12:>12} {'-'*12:>12}")
-                    def line3(label, f, g, w, fmt=".4f"):
-                        def fmt1(x): return ("{:"+fmt+"}").format(float(x)) if np.isfinite(x) else "nan"
-                        print(f"    {label:<14} {fmt1(f):>12} {fmt1(g):>12} {fmt1(w):>12}")
-                    line3("CumRet mean",  ab['cum_ret_mean'],  ag['cum_ret_mean'],  aw['cum_ret_mean'])
-                    line3("CAGR mean",    ab['cagr_mean'],     ag['cagr_mean'],     aw['cagr_mean'])
-                    line3("Sharpe mean",  ab['sharpe_mean'],   ag['sharpe_mean'],   aw['sharpe_mean'], fmt=".3f")
-                    line3("Calmar mean",  ab['calmar_mean'],   ag['calmar_mean'],   aw['calmar_mean'], fmt=".3f")
-                    line3("MaxDD mean",   ab['mdd_mean'],      ag['mdd_mean'],      aw['mdd_mean'],    fmt=".3f")
-                    print(f"    {'AdjTreynor mean':<14} {tb_mean:>11.3f} {tg_mean:>12.3f} {tw_mean:>12.3f}")
+                    print(
+                        f"    {'Metric':<14} {'Classic':>12} {'Risk-adj':>12} {'Weighted':>12}"
+                    )
+                    print(
+                        f"    {'-' * 14:<14} {'-' * 12:>12} {'-' * 12:>12} {'-' * 12:>12}"
+                    )
 
-            # ===================== Significance — compact tables =====================
-            section("Significance — Paired, one-sided (per-side α = {:.3f}; overall two-sided 5%)".format(PER_SIDE_ALPHA))
+                    def line3(label, fval, gval, wval, fmt=".4f"):
+                        def fmt1(x):
+                            return ("{:" + fmt + "}").format(float(x)) if np.isfinite(x) else "nan"
+                        print(
+                            f"    {label:<14} {fmt1(fval):>12} {fmt1(gval):>12} {fmt1(wval):>12}"
+                        )
 
-            # Build arrays for paired tests
-            b_list = full_metrics[direction]['baseline']
-            g_list = full_metrics[direction]['gps']
+                    line3("Return mean", ac['cum_ret_mean'],
+                          ar['cum_ret_mean'], aw['cum_ret_mean'])
+                    line3("CAGR mean", ac['cagr_mean'],
+                          ar['cagr_mean'], aw['cagr_mean'])
+                    line3("Sharpe mean", ac['sharpe_mean'],
+                          ar['sharpe_mean'], aw['sharpe_mean'], fmt=".3f")
+                    line3("MDD mean", ac['mdd_mean'],
+                          ar['mdd_mean'], aw['mdd_mean'], fmt=".3f")
 
-            def sig_pair_block(left_label, right_label, L_list, R_list, df_dir_metrics, direction_label: str):
+            # ===================== Significance — Paired, two-sided =====================
+            section(
+                f"Significance — Paired, two-sided (α = {SIGNIF_TWO_SIDED_ALPHA:.3f})"
+            )
+
+            c_list = full_metrics[direction]['classic']
+            r_list = full_metrics[direction]['risk']
+            arr_ = lambda attr, L: np.array(
+                [getattr(p, attr) for p in L], dtype=float
+            )
+
+            def sig_pair_block(left_label, right_label,
+                               L_list, R_list):
                 """
-                Builds a compact significance table for:
-                  Return, CAGR, Sharpe, Sortino, Calmar, AdjTreynor (abs beta), MaxDD (raw; higher=better).
-                Prints a single aligned table with per-metric n, t/p for both one-sided directions, and a Conclusion.
-
-                Parameters
-                ----------
-                left_label : {'baseline','gps','weighted'}
-                    The 'left' portfolio label.
-                right_label : {'baseline','gps','weighted'}
-                    The 'right' portfolio label. If 'weighted', RIGHT metrics are always taken from direction='long'.
-                L_list, R_list : list[Perf]
-                    Port-only Perf lists for LEFT and RIGHT (paired by run index).
-                df_dir_metrics : pd.DataFrame or None
-                    Metrics DataFrame to source relative stats from. If None or empty, falls back to df_metrics_all.
-                direction_label : {'long','short'}
-                    The caller's direction for the LEFT side; RIGHT uses 'long' when comparing to 'weighted'.
+                Compact significance table for two-sided paired tests:
+                  Return, CAGR, Sharpe, MDD.
                 """
-                print(f"[ {left_label.upper()}  →  {right_label.upper()} ]  (α_one-sided={PER_SIDE_ALPHA:.3f})")
-
-                # --- Port-only stats (arrays you passed already encode long/short) ---
-                arr = lambda attr, L: np.array([getattr(p, attr) for p in L], dtype=float)
+                print(
+                    f"[ {left_label.upper()}  →  {right_label.upper()} ]  "
+                    f"(two-sided α={SIGNIF_TWO_SIDED_ALPHA:.3f})"
+                )
 
                 rows = []
 
-                def add_row(metric_name, t_g, p_g, t_l, p_l, n):
+                def add_row(metric_name, t, p, n):
                     rows.append({
                         "Metric": metric_name,
                         "n": ("" if n is None else f"{n:d}"),
-                        "t(>)": _fmt(t_g), "p(>)": _fmt_p(p_g),
-                        "t(<)": _fmt(t_l), "p(<)": _fmt_p(p_l),
-                        "Conclusion": _sig_conclusion(p_g, p_l, left_label, right_label)
+                        "t": _fmt(t),
+                        "p(two-sided)": _fmt_p(
+                            p, SIGNIF_TWO_SIDED_ALPHA
+                        ),
+                        "Conclusion": _sig_conclusion(
+                            t, p, left_label, right_label,
+                            alpha=SIGNIF_TWO_SIDED_ALPHA
+                        ),
                     })
 
-                # 1) Port-only metrics
                 for mname, attr in [
                     ("Return", "cum_ret"),
                     ("CAGR", "cagr"),
                     ("Sharpe", "sharpe"),
-                    ("Sortino", "sortino"),
-                    ("Calmar", "calmar"),
+                    ("MDD", "mdd"),
                 ]:
-                    t_g, p_g, t_l, p_l, n = paired_one_sided_both(arr(attr, L_list), arr(attr, R_list))
-                    add_row(mname, t_g, p_g, t_l, p_l, n)
+                    t, p, n = paired_two_sided(
+                        arr_(attr, L_list), arr_(attr, R_list)
+                    )
+                    add_row(mname, t, p, n)
 
-                # 2) Benchmark-relative metrics from the metrics DataFrame you pass in (fallback to df_metrics_all)
-                base = df_dir_metrics if (df_dir_metrics is not None and not df_dir_metrics.empty) else df_metrics_all
-
-                def _metric_by(strategy: str, direction_lbl: str, col: str) -> pd.DataFrame:
-                    # Robust guard for missing/empty base
-                    if base is None or (hasattr(base, "empty") and base.empty):
-                        return pd.DataFrame(columns=['run', 'val'])
-                    if col not in base.columns:
-                        return pd.DataFrame(columns=['run', 'val'])
-                    sub = base[(base['strategy'] == strategy) & (base['direction'] == direction_lbl)]
-                    if sub.empty:
-                        return pd.DataFrame(columns=['run', 'val'])
-                    return sub[['run', col]].dropna().rename(columns={col: 'val'})
-
-                # Use explicit directions: left side = current loop direction;
-                # right side = 'long' only when comparing against the weighted benchmark.
-                dir_L = direction_label
-                dir_R = 'long' if right_label.lower() == 'weighted' else direction_label
-
-                # Adjusted Treynor (abs beta)
-                L = _metric_by(left_label.lower(), dir_L, 'treynor_adj')
-                R = _metric_by(right_label.lower(), dir_R, 'treynor_adj')
-                if not L.empty and not R.empty:
-                    merged = pd.merge(L, R, on='run', suffixes=('_L', '_R')).dropna()
-                    if not merged.empty:
-                        t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
-                        add_row("AdjTreynor", t_g, p_g, t_l, p_l, n)
-                    else:
-                        add_row("AdjTreynor", None, None, None, None, 0)
-                else:
-                    add_row("AdjTreynor", None, None, None, None, 0)
-
-                # MaxDD (raw, higher is better i.e., less severe)
-                L = _metric_by(left_label.lower(), dir_L, 'mdd_raw')
-                R = _metric_by(right_label.lower(), dir_R, 'mdd_raw')
-                if not L.empty and not R.empty:
-                    merged = pd.merge(L, R, on='run', suffixes=('_L', '_R')).dropna()
-                    if not merged.empty:
-                        t_g, p_g, t_l, p_l, n = paired_one_sided_both(merged['val_L'].values, merged['val_R'].values)
-                        add_row("MaxDD (raw)", t_g, p_g, t_l, p_l, n)
-                    else:
-                        add_row("MaxDD (raw)", None, None, None, None, 0)
-                else:
-                    add_row("MaxDD (raw)", None, None, None, None, 0)
-
-                # --- Render once as a clean table ---
-                df_out = pd.DataFrame(rows, columns=["Metric", "n", "t(>)", "p(>)", "t(<)", "p(<)", "Conclusion"])
+                df_out = pd.DataFrame(
+                    rows,
+                    columns=["Metric", "n", "t", "p(two-sided)", "Conclusion"],
+                )
                 print(df_to_string_centered(df_out, index=False))
                 print("")
 
-            # inside the long/short loop
-            w_list = full_metrics['long']['weighted']  # benchmark lives on LONG
-
-            # Use the full metrics table as the base; the function picks the proper direction internally.
-            sig_pair_block("baseline", "gps", b_list, g_list, df_metrics_all, direction_label=direction)
-
             if direction == 'long':
-                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all, direction_label='long')
-                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all, direction_label='long')
-            else:  # direction == 'short' → compare short portfolios vs long-only weighted benchmark
-                sig_pair_block("baseline", "weighted", b_list, w_list, df_metrics_all, direction_label='short')
-                sig_pair_block("gps", "weighted", g_list, w_list, df_metrics_all, direction_label='short')
+                w_list = full_metrics['long']['weighted']
 
-            # visual separator (optional)
+                sig_pair_block("classic long", "risk long",
+                               c_list, r_list)
+                sig_pair_block("classic long", "weighted long",
+                               c_list, w_list)
+                sig_pair_block("risk long", "weighted long",
+                               r_list, w_list)
+
+            if direction == 'short':
+                w_list = full_metrics['long']['weighted']
+
+                sig_pair_block("classic short", "risk short",
+                               c_list, r_list)
+                sig_pair_block("classic short", "weighted long",
+                               c_list, w_list)
+                sig_pair_block("risk short", "weighted long",
+                               r_list, w_list)
+
             print(rule("─"))
             print("")
 
         total_elapsed = time.time() - t0
         section("Completed")
-        print(f"Total runtime: {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}\n")
+        print(
+            f"Total runtime: {time.strftime('%H:%M:%S', time.gmtime(total_elapsed))}\n"
+        )
 
-        # === Save metrics table (raw dump; no one_minus_mdd) ===
+        # === Save metrics table + correlations ===
         if metrics_rows:
             df_metrics = pd.DataFrame(metrics_rows)
-            df_metrics['mer_ann'] = 12.0 * df_metrics['mer_m']
-            df_metrics.to_csv(OUT_DIR_MC / "performance_metrics_by_portfolio.csv", index=False)
+            df_metrics['excess_ret_ann'] = 12.0 * df_metrics['excess_ret_m']
+            df_metrics.to_csv(
+                OUT_DIR_MC / "performance_metrics_by_portfolio.csv",
+                index=False,
+            )
+
+            metric_cols = [
+                "sharpe", "sortino", "treynor", "information",
+                "calmar", "cum_ret", "mdd", "excess_ret_ann",
+            ]
+
+            # Per-direction Sharpe <-> CumRet
+            for d in ["long", "short"]:
+                sub = df_metrics[df_metrics["direction"] == d]
+                if sub.shape[0] < 2:
+                    continue
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    corr = sub[metric_cols].astype(float).corr()
+                if ("sharpe" in corr.index) and ("cum_ret" in corr.columns):
+                    corr.to_csv(corr_dir / f"metrics_correlation_matrix_{d}.csv")
+
+            # Per-direction & per-strategy
+            for d in ["long", "short"]:
+                strategies = (
+                    ["classic", "risk", "weighted"]
+                    if d == "long" else ["classic", "risk"]
+                )
+                for s in strategies:
+                    sub = df_metrics[
+                        (df_metrics["direction"] == d)
+                        & (df_metrics["strategy"] == s)
+                    ]
+                    if sub.shape[0] < 2:
+                        continue
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        corr = sub[metric_cols].astype(float).corr()
+                    if ("sharpe" in corr.index) and ("cum_ret" in corr.columns):
+                        corr.to_csv(
+                            corr_dir
+                            / f"metrics_correlation_matrix_{d}_{s}.csv"
+                        )
+
+            # Global correlation matrix (all directions/strategies)
+            if GENERATE_METRICS_CORR_CSV or GENERATE_METRICS_CORR_HEATMAP:
+                corr = compute_metrics_correlation(df_metrics, metric_cols)
+                if not corr.empty:
+                    if GENERATE_METRICS_CORR_CSV:
+                        save_correlation_csv(
+                            corr, corr_dir / "metrics_correlation_matrix.csv"
+                        )
+                    if GENERATE_METRICS_CORR_HEATMAP:
+                        save_correlation_heatmap(
+                            corr, corr_dir / "metrics_correlation_heatmap.pdf"
+                        )
 
     # === Write terminal printout to file ===
     with open(OUT_DIR_MC / "console_report.txt", "w", encoding="utf-8") as f:
@@ -1320,7 +1762,7 @@ def run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIE
 
 
 # =============================== #
-# 13) RUN — single efficient call
+# 11) RUN
 # =============================== #
 if __name__ == "__main__":
-    run_monte_carlo_both(n_runs=MC_RUNS, lam=LAMBDA_EWMA, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)
+    run_monte_carlo_both(n_runs=MC_RUNS, save_series=SAVE_SERIES, zero_noise=ZERO_NOISE)

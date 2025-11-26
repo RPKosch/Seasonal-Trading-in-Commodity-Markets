@@ -1,0 +1,381 @@
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Starting Monte Carlo — RLSSA (BOTH directions) | runs=1,000 | lambda=0.97 | zero_noise=False
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Ranking: RLSSA(L=36, q=12, scale=EWMA)
+Windows: Lookback=10y | Test=5y (2011-01-01→2015-12-31) | Apply=2016-01-01→2024-12-31
+GPS: rolling=True, calib=5y | Entry cost per month=0.0025
+
+  Progress: completed   10/1000 runs | elapsed 00:05:12
+  Progress: completed   20/1000 runs | elapsed 00:44:52
+  Progress: completed   30/1000 runs | elapsed 01:26:15
+  Progress: completed   40/1000 runs | elapsed 01:31:49
+  Progress: completed   50/1000 runs | elapsed 01:37:32
+  Progress: completed   60/1000 runs | elapsed 01:43:44
+  Progress: completed   70/1000 runs | elapsed 01:50:18
+  Progress: completed   80/1000 runs | elapsed 01:57:06
+  Progress: completed   90/1000 runs | elapsed 02:04:07
+  Progress: completed  100/1000 runs | elapsed 02:11:19
+  Progress: completed  110/1000 runs | elapsed 02:18:28
+  Progress: completed  120/1000 runs | elapsed 02:39:58
+  Progress: completed  130/1000 runs | elapsed 03:43:11
+  Progress: completed  140/1000 runs | elapsed 04:44:55
+  Progress: completed  150/1000 runs | elapsed 05:35:05
+  Progress: completed  160/1000 runs | elapsed 06:13:01
+  Progress: completed  170/1000 runs | elapsed 06:47:57
+  Progress: completed  180/1000 runs | elapsed 07:21:18
+  Progress: completed  190/1000 runs | elapsed 07:25:42
+  Progress: completed  200/1000 runs | elapsed 07:30:24
+  Progress: completed  210/1000 runs | elapsed 07:35:07
+  Progress: completed  220/1000 runs | elapsed 07:39:54
+  Progress: completed  230/1000 runs | elapsed 07:44:38
+  Progress: completed  240/1000 runs | elapsed 07:49:20
+  Progress: completed  250/1000 runs | elapsed 07:54:06
+  Progress: completed  260/1000 runs | elapsed 07:58:50
+  Progress: completed  270/1000 runs | elapsed 08:03:36
+  Progress: completed  280/1000 runs | elapsed 08:08:24
+  Progress: completed  290/1000 runs | elapsed 08:13:08
+  Progress: completed  300/1000 runs | elapsed 08:17:54
+  Progress: completed  310/1000 runs | elapsed 08:22:40
+  Progress: completed  320/1000 runs | elapsed 08:27:32
+  Progress: completed  330/1000 runs | elapsed 08:32:26
+  Progress: completed  340/1000 runs | elapsed 08:37:29
+  Progress: completed  350/1000 runs | elapsed 08:42:17
+  Progress: completed  360/1000 runs | elapsed 08:47:09
+  Progress: completed  370/1000 runs | elapsed 08:51:55
+  Progress: completed  380/1000 runs | elapsed 08:56:45
+  Progress: completed  390/1000 runs | elapsed 09:01:23
+  Progress: completed  400/1000 runs | elapsed 09:05:28
+  Progress: completed  410/1000 runs | elapsed 09:09:33
+  Progress: completed  420/1000 runs | elapsed 09:13:38
+  Progress: completed  430/1000 runs | elapsed 09:17:41
+  Progress: completed  440/1000 runs | elapsed 09:21:45
+  Progress: completed  450/1000 runs | elapsed 09:25:48
+  Progress: completed  460/1000 runs | elapsed 09:29:51
+  Progress: completed  470/1000 runs | elapsed 09:33:55
+  Progress: completed  480/1000 runs | elapsed 09:37:58
+  Progress: completed  490/1000 runs | elapsed 09:42:02
+  Progress: completed  500/1000 runs | elapsed 09:46:05
+  Progress: completed  510/1000 runs | elapsed 09:50:08
+  Progress: completed  520/1000 runs | elapsed 09:54:12
+  Progress: completed  530/1000 runs | elapsed 09:58:15
+  Progress: completed  540/1000 runs | elapsed 10:02:19
+  Progress: completed  550/1000 runs | elapsed 10:06:22
+  Progress: completed  560/1000 runs | elapsed 10:10:26
+  Progress: completed  570/1000 runs | elapsed 10:14:29
+  Progress: completed  580/1000 runs | elapsed 10:18:33
+  Progress: completed  590/1000 runs | elapsed 10:22:36
+  Progress: completed  600/1000 runs | elapsed 10:26:40
+  Progress: completed  610/1000 runs | elapsed 10:30:43
+  Progress: completed  620/1000 runs | elapsed 10:34:46
+  Progress: completed  630/1000 runs | elapsed 10:38:50
+  Progress: completed  640/1000 runs | elapsed 10:42:53
+  Progress: completed  650/1000 runs | elapsed 10:46:58
+  Progress: completed  660/1000 runs | elapsed 10:51:03
+  Progress: completed  670/1000 runs | elapsed 10:55:07
+  Progress: completed  680/1000 runs | elapsed 10:59:11
+  Progress: completed  690/1000 runs | elapsed 11:03:15
+  Progress: completed  700/1000 runs | elapsed 11:07:19
+  Progress: completed  710/1000 runs | elapsed 11:11:23
+  Progress: completed  720/1000 runs | elapsed 11:15:27
+  Progress: completed  730/1000 runs | elapsed 11:19:30
+  Progress: completed  740/1000 runs | elapsed 11:23:34
+  Progress: completed  750/1000 runs | elapsed 11:27:37
+  Progress: completed  760/1000 runs | elapsed 11:31:41
+  Progress: completed  770/1000 runs | elapsed 11:35:44
+  Progress: completed  780/1000 runs | elapsed 11:39:48
+  Progress: completed  790/1000 runs | elapsed 11:43:51
+  Progress: completed  800/1000 runs | elapsed 11:58:56
+  Progress: completed  810/1000 runs | elapsed 12:03:15
+  Progress: completed  820/1000 runs | elapsed 12:07:30
+  Progress: completed  830/1000 runs | elapsed 12:11:41
+  Progress: completed  840/1000 runs | elapsed 12:15:55
+  Progress: completed  850/1000 runs | elapsed 12:20:11
+  Progress: completed  860/1000 runs | elapsed 12:24:24
+  Progress: completed  870/1000 runs | elapsed 12:28:41
+  Progress: completed  880/1000 runs | elapsed 12:32:50
+  Progress: completed  890/1000 runs | elapsed 12:36:59
+  Progress: completed  900/1000 runs | elapsed 12:41:05
+  Progress: completed  910/1000 runs | elapsed 12:45:15
+  Progress: completed  920/1000 runs | elapsed 12:49:23
+  Progress: completed  930/1000 runs | elapsed 12:53:28
+  Progress: completed  940/1000 runs | elapsed 12:57:31
+  Progress: completed  950/1000 runs | elapsed 13:01:35
+  Progress: completed  960/1000 runs | elapsed 13:05:38
+  Progress: completed  970/1000 runs | elapsed 13:09:42
+  Progress: completed  980/1000 runs | elapsed 13:13:45
+  Progress: completed  990/1000 runs | elapsed 13:17:49
+  Progress: completed 1000/1000 runs | elapsed 13:21:52
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Top-5 selection share tables (per month)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Direction: LONG — Top-5 per method (Baseline first 5 columns, GPS next 5)
+   Date           B1            B2            B3            B4           B5            G1            G2            G3            G4           G5    
+2016-01-01  [GD | 100.0%]                                                        [CF | 100.0%]                                                      
+2016-02-01   [CF | 15.3%]  [CC | 11.1%]  [CT | 10.0%]  [HO | 9.3%]  [HE | 8.8%]   [CF | 13.9%]  [CC | 12.6%]  [CT | 12.0%]  [HE | 9.6%]  [HO | 8.6%]
+2016-03-01   [LE | 12.4%]  [SU | 10.5%]  [HO | 8.1%]   [CO | 7.5%]  [CT | 7.2%]   [GD | 9.3%]   [HO | 8.9%]   [SU | 8.9%]   [CO | 8.0%]  [LE | 8.0%]
+2016-04-01   [ZC | 10.1%]  [ZW | 10.0%]  [LE | 8.8%]   [GD | 8.3%]  [CO | 8.1%]   [ZC | 13.0%]  [ZW | 11.9%]  [ZS | 8.8%]   [CO | 8.4%]  [GD | 7.9%]
+2016-05-01   [SV | 10.1%]  [CO | 9.4%]   [LE | 9.1%]   [HO | 9.1%]  [CF | 8.7%]   [SV | 9.6%]   [ZW | 9.6%]   [CT | 9.1%]   [CF | 8.4%]  [CO | 8.3%]
+2016-06-01   [HE | 11.2%]  [LE | 10.2%]  [CT | 9.1%]   [GD | 9.1%]  [ZS | 7.9%]   [HE | 10.4%]  [ZS | 10.0%]  [ZC | 8.7%]   [GD | 7.9%]  [LE | 7.8%]
+2016-07-01   [HE | 15.2%]  [ZC | 9.4%]   [ZW | 9.2%]   [GD | 7.1%]  [CT | 6.9%]   [ZC | 12.0%]  [HE | 11.1%]  [ZW | 10.9%]  [GD | 7.6%]  [ZS | 7.0%]
+2016-08-01   [ZS | 13.4%]  [LE | 9.5%]   [ZC | 8.8%]   [CF | 8.4%]  [CP | 7.7%]   [ZS | 12.6%]  [ZC | 10.5%]  [CF | 8.9%]   [ZW | 8.7%]  [CP | 8.2%]
+2016-09-01   [HE | 12.5%]  [LE | 9.8%]   [CC | 9.6%]   [GD | 9.5%]  [CT | 8.9%]   [HE | 14.1%]  [CC | 10.7%]  [GD | 8.4%]   [CT | 8.4%]  [NG | 7.8%]
+2016-10-01   [LE | 11.5%]  [HE | 11.4%]  [ZS | 10.6%]  [CO | 9.0%]  [SV | 8.2%]   [HE | 10.9%]  [ZS | 10.3%]  [SU | 9.2%]   [SV | 8.5%]  [NG | 8.1%]
+2016-11-01   [CF | 10.8%]  [HE | 10.5%]  [ZC | 9.0%]   [ZW | 8.2%]  [LE | 7.8%]   [ZC | 11.4%]  [CF | 10.8%]  [ZW | 9.2%]   [SU | 7.9%]  [HE | 7.2%]
+2016-12-01   [ZS | 11.7%]  [CF | 10.4%]  [GD | 9.6%]   [HO | 9.5%]  [ZC | 8.5%]   [ZS | 12.6%]  [GD | 9.0%]   [CF | 8.5%]   [CO | 7.9%]  [HO | 7.7%]
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/RLSSA_MC_EWMA_3_FINAL/top5_selections_table_long.csv
+
+Direction: SHORT — Top-5 per method (Baseline first 5 columns, GPS next 5)
+   Date           B1            B2            B3            B4           B5            G1            G2            G3           G4           G5    
+2016-01-01  [CP | 100.0%]                                                        [ZS | 100.0%]                                                     
+2016-02-01   [GD | 16.1%]  [LE | 11.9%]  [ZC | 10.6%]  [SV | 8.9%]  [SU | 7.4%]   [LE | 10.3%]  [GD | 10.0%]  [ZC | 8.9%]  [ZW | 8.5%]  [NG | 8.0%]
+2016-03-01   [ZS | 10.9%]  [HE | 10.4%]  [ZW | 7.8%]   [HO | 7.6%]  [NG | 7.5%]   [ZS | 8.6%]   [HE | 8.1%]   [CF | 7.9%]  [ZW | 7.4%]  [SV | 7.1%]
+2016-04-01   [HE | 11.0%]  [NG | 10.8%]  [CF | 10.3%]  [LE | 9.3%]  [HO | 8.8%]   [NG | 8.9%]   [HE | 8.9%]   [LE | 8.3%]  [CF | 8.3%]  [CP | 8.1%]
+2016-05-01   [ZS | 11.9%]  [NG | 10.3%]  [LE | 10.1%]  [GD | 9.2%]  [CC | 9.1%]   [NG | 9.1%]   [ZS | 8.4%]   [GD | 7.5%]  [CC | 7.5%]  [HO | 7.2%]
+2016-06-01   [CF | 11.9%]  [ZW | 10.5%]  [LE | 9.6%]   [HO | 9.6%]  [NG | 9.5%]   [ZW | 9.9%]   [CF | 8.9%]   [NG | 8.9%]  [SU | 7.6%]  [LE | 6.9%]
+2016-07-01   [LE | 15.9%]  [NG | 8.3%]   [CO | 8.0%]   [HO | 7.8%]  [GD | 7.3%]   [LE | 9.9%]   [NG | 8.1%]   [SU | 7.4%]  [CT | 7.3%]  [ZS | 7.3%]
+2016-08-01   [HE | 14.1%]  [CO | 13.2%]  [HO | 11.2%]  [LE | 9.6%]  [GD | 8.7%]   [CO | 10.2%]  [HE | 9.5%]   [LE | 8.2%]  [HO | 8.1%]  [GD | 8.0%]
+2016-09-01   [ZS | 12.4%]  [ZC | 10.3%]  [LE | 9.7%]   [HO | 9.5%]  [ZW | 7.6%]   [HO | 9.7%]   [ZS | 9.3%]   [ZC | 9.1%]  [ZW | 8.2%]  [SU | 7.1%]
+2016-10-01   [ZC | 13.1%]  [CC | 10.8%]  [CT | 9.1%]   [LE | 8.9%]  [ZW | 8.1%]   [GD | 9.5%]   [ZC | 9.0%]   [ZW | 8.6%]  [LE | 7.6%]  [SU | 6.8%]
+2016-11-01   [LE | 14.9%]  [CO | 11.7%]  [ZS | 10.7%]  [HO | 9.2%]  [GD | 7.4%]   [LE | 10.1%]  [ZS | 8.6%]   [CO | 8.2%]  [HO | 8.0%]  [NG | 7.6%]
+2016-12-01   [LE | 16.3%]  [HE | 10.4%]  [SU | 10.3%]  [NG | 9.5%]  [CP | 6.8%]   [LE | 11.7%]  [HE | 9.2%]   [SU | 7.6%]  [CP | 7.4%]  [CT | 7.3%]
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/RLSSA_MC_EWMA_3_FINAL/top5_selections_table_short.csv
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: LONG
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Test    : 2011-01-01 → 2015-12-31  (5y)
+  Apply   : 2016-01-01 → 2024-12-31
+  RLSSA   : L=36, q=12, scale=EWMA   | GPS rolling=True, calib=5y   | Entry cost=0.0025
+
+Outcome counts (Top-1 over apply)
+  Strategy    Pos(+)  Neg(-)
+  ---------- ------- -------
+  Baseline       432     568
+  GPS            409     591
+  Weighted       978      22
+
+BASELINE — Full Apply Period (across 1000 runs)
+      Metric         Mean    Median    SD  
+      CumRet        0.5229  -0.1538  2.2801
+       CAGR        -0.0165  -0.0184  0.1252
+      Sharpe        0.134    0.148   0.313 
+     Sortino        0.273    0.258   0.571 
+      Calmar        0.006    -0.026  0.193 
+       MDD          -0.734   -0.752  0.138 
+     Treynor        0.065    0.059   0.207 
+Vol(within-month)   0.1173   0.1164  0.0131
+
+GPS — Full Apply Period (across 1000 runs)
+      Metric         Mean    Median    SD  
+      CumRet        0.3989  -0.2417  2.1240
+       CAGR        -0.0267  -0.0303  0.1257
+      Sharpe        0.108    0.119   0.318 
+     Sortino        0.226    0.209   0.575 
+      Calmar        -0.007   -0.043  0.193 
+       MDD          -0.733   -0.746  0.138 
+     Treynor        0.045    0.048   0.155 
+Vol(within-month)   0.1179   0.1166  0.0136
+
+WEIGHTED — Full Apply Period (across 1000 runs)
+      Metric        Mean   Median    SD  
+      CumRet       0.5196  0.4761  0.3355
+       CAGR        0.0452  0.0442  0.0249
+      Sharpe       0.378   0.373   0.166 
+     Sortino       0.601   0.594   0.274 
+      Calmar       0.129   0.117   0.087 
+       MDD         -0.382  -0.382  0.066 
+     Treynor       0.054   0.054   0.024 
+Vol(within-month)  0.0415  0.0416  0.0020
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean         -0.0584      -0.1693      -0.0690
+    CAGR mean           -0.0574      -0.0942      -0.0250
+    Sharpe mean          -0.060       -0.173       -0.194
+    Calmar mean           0.004       -0.098       -0.083
+    MDD mean             -0.508       -0.507       -0.195
+    Treynor mean         0.091       -0.128       -0.020
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.3069       0.3423       0.2954
+    CAGR mean            0.0417       0.0492       0.0882
+    Sharpe mean           0.230        0.251        0.581
+    Calmar mean           0.237        0.262        0.345
+    MDD mean             -0.492       -0.490       -0.270
+    Treynor mean         0.196        0.548        0.098
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric             Baseline          GPS     Weighted
+    -------------- ------------ ------------ ------------
+    CumRet mean          0.2615       0.2392       0.2610
+    CAGR mean            0.0180       0.0173       0.0782
+    Sharpe mean           0.170        0.167        0.578
+    Calmar mean           0.193        0.177        0.518
+    MDD mean             -0.538       -0.537       -0.190
+    Treynor mean         0.072       -0.612        0.085
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, two-sided (α = 0.010)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ BASELINE  →  GPS ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)  Conclusion
+ Return  1000  -1.430     0.1530         ns    
+  CAGR   1000  -2.035     0.0421         ns    
+ Sharpe  1000  -2.096     0.0363         ns    
+Sortino  1000  -2.045     0.0411         ns    
+ Calmar  1000  -1.717     0.0864         ns    
+Treynor  1000  -2.506     0.0124         ns    
+  MDD    1000  0.207      0.8357         ns    
+
+[ BASELINE  →  WEIGHTED ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)       Conclusion    
+ Return  1000  -0.046     0.9632              ns        
+  CAGR   1000  15.753    0.0000*     weighted > baseline
+ Sharpe  1000  23.362    0.0000*     weighted > baseline
+Sortino  1000  17.472    0.0000*     weighted > baseline
+ Calmar  1000  19.229    0.0000*     weighted > baseline
+Treynor  1000  -1.615     0.1067              ns        
+  MDD    1000  74.710    0.0000*     weighted > baseline
+
+[ GPS  →  WEIGHTED ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)    Conclusion  
+ Return  1000  1.794      0.0731           ns      
+  CAGR   1000  18.262    0.0000*     weighted > gps
+ Sharpe  1000  25.527    0.0000*     weighted > gps
+Sortino  1000  19.644    0.0000*     weighted > gps
+ Calmar  1000  21.436    0.0000*     weighted > gps
+Treynor  1000  1.889      0.0592           ns      
+  MDD    1000  75.829    0.0000*     weighted > gps
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: SHORT
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Test    : 2011-01-01 → 2015-12-31  (5y)
+  Apply   : 2016-01-01 → 2024-12-31
+  RLSSA   : L=36, q=12, scale=EWMA   | GPS rolling=True, calib=5y   | Entry cost=0.0025
+
+Outcome counts (Top-1 over apply)
+  Strategy    Pos(+)  Neg(-)
+  ---------- ------- -------
+  Baseline       396     604
+  GPS            361     639
+
+BASELINE — Full Apply Period (across 1000 runs)
+      Metric         Mean    Median    SD  
+      CumRet        0.4164  -0.2835  2.3457
+       CAGR        -0.0304  -0.0364  0.1281
+      Sharpe        0.096    0.105   0.316 
+     Sortino        0.234    0.187   0.630 
+      Calmar        -0.012   -0.050  0.197 
+       MDD          -0.745   -0.762  0.137 
+     Treynor        0.043    0.043   0.151 
+Vol(within-month)   0.1228   0.1199  0.0189
+
+GPS — Full Apply Period (across 1000 runs)
+      Metric         Mean    Median    SD  
+      CumRet        0.3443  -0.3244  1.9986
+       CAGR        -0.0305  -0.0426  0.1235
+      Sharpe        0.093    0.091   0.312 
+     Sortino        0.223    0.164   0.612 
+      Calmar        -0.015   -0.056  0.185 
+       MDD          -0.737   -0.750  0.137 
+     Treynor        0.039    0.037   0.158 
+Vol(within-month)   0.1206   0.1173  0.0184
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric             Baseline          GPS
+    -------------- ------------ ------------
+    CumRet mean          0.1476       0.1488
+    CAGR mean            0.0052       0.0054
+    Sharpe mean           0.111        0.112
+    Calmar mean           0.157        0.162
+    MDD mean             -0.466       -0.452
+    Treynor mean         -1.651        0.422
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric             Baseline          GPS
+    -------------- ------------ ------------
+    CumRet mean          0.0454       0.0900
+    CAGR mean           -0.0380      -0.0245
+    Sharpe mean           0.022        0.045
+    Calmar mean           0.036        0.068
+    MDD mean             -0.558       -0.549
+    Treynor mean          0.067       -0.040
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric             Baseline          GPS
+    -------------- ------------ ------------
+    CumRet mean          0.1723       0.1245
+    CAGR mean           -0.0077      -0.0214
+    Sharpe mean           0.100        0.070
+    Calmar mean           0.148        0.115
+    MDD mean             -0.496       -0.499
+    Treynor mean          0.089        0.106
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, two-sided (α = 0.010)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ BASELINE  →  GPS ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)  Conclusion
+ Return  1000  -0.913     0.3616         ns    
+  CAGR   1000  -0.028     0.9776         ns    
+ Sharpe  1000  -0.283     0.7775         ns    
+Sortino  1000  -0.443     0.6577         ns    
+ Calmar  1000  -0.332     0.7396         ns    
+Treynor  1000  -0.547     0.5844         ns    
+  MDD    1000  1.495      0.1351         ns    
+
+[ BASELINE  →  WEIGHTED ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)       Conclusion    
+ Return  1000  1.356      0.1755              ns        
+  CAGR   1000  17.757    0.0000*     weighted > baseline
+ Sharpe  1000  23.369    0.0000*     weighted > baseline
+Sortino  1000  16.006    0.0000*     weighted > baseline
+ Calmar  1000  19.767    0.0000*     weighted > baseline
+Treynor  1000  2.342      0.0194              ns        
+  MDD    1000  74.791    0.0000*     weighted > baseline
+
+[ GPS  →  WEIGHTED ]  (two-sided α=0.010)
+ Metric   n      t     p(two-sided)    Conclusion  
+ Return  1000  2.722     0.0066*     weighted > gps
+  CAGR   1000  18.798    0.0000*     weighted > gps
+ Sharpe  1000  24.941    0.0000*     weighted > gps
+Sortino  1000  17.514    0.0000*     weighted > gps
+ Calmar  1000  21.766    0.0000*     weighted > gps
+Treynor  1000  2.933     0.0034*     weighted > gps
+  MDD    1000  73.387    0.0000*     weighted > gps
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Completed
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Total runtime: 13:21:53
+

@@ -1,0 +1,237 @@
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Starting Monte Carlo (MEB) — BOTH directions (classic vs risk-adjusted SSA) | runs=100 | zero_noise=False
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+  Progress: completed   10/100  runs | elapsed 00:00:46
+  Progress: completed   20/100  runs | elapsed 00:01:37
+  Progress: completed   30/100  runs | elapsed 00:02:24
+  Progress: completed   40/100  runs | elapsed 00:03:28
+  Progress: completed   50/100  runs | elapsed 00:04:19
+  Progress: completed   60/100  runs | elapsed 00:05:08
+  Progress: completed   70/100  runs | elapsed 00:06:01
+  Progress: completed   80/100  runs | elapsed 00:06:47
+  Progress: completed   90/100  runs | elapsed 00:07:33
+  Progress: completed  100/100  runs | elapsed 00:08:17
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Top-5 selection share tables (per month)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Direction: LONG — Top-5 per method (Classic first 5 columns, Risk-adjusted next 5)
+   Date           C1            C2            C3            C4       C5        R1            R2            R3            R4       R5
+2016-01-01   [ZW | 64.0%]  [CP | 20.0%]  [SV | 13.0%]  [ZC | 3.0%]        [NG | 87.0%]  [HE | 13.0%]                                
+2016-02-01   [CF | 60.0%]  [HO | 40.0%]                                   [HE | 35.0%]  [CT | 35.0%]  [CC | 20.0%]  [HO | 10.0%]    
+2016-03-01  [LE | 100.0%]                                                [LE | 100.0%]                                              
+2016-04-01   [ZW | 93.0%]  [ZC | 7.0%]                                    [ZW | 76.0%]  [ZS | 21.0%]  [ZC | 3.0%]                   
+2016-05-01   [SV | 73.0%]  [CO | 27.0%]                                   [CO | 49.0%]  [ZW | 31.0%]  [SV | 20.0%]                  
+2016-06-01  [HE | 100.0%]                                                [HE | 100.0%]                                              
+2016-07-01   [ZC | 86.0%]  [HE | 6.0%]   [CC | 5.0%]   [ZW | 3.0%]        [ZC | 52.0%]  [CC | 48.0%]                                
+2016-08-01   [ZW | 47.0%]  [CF | 19.0%]  [ZS | 17.0%]  [ZC | 17.0%]       [ZS | 59.0%]  [ZW | 40.0%]  [NG | 1.0%]                   
+2016-09-01   [HE | 64.0%]  [CO | 36.0%]                                  [HE | 100.0%]                                              
+2016-10-01   [HE | 53.0%]  [CO | 47.0%]                                  [HE | 100.0%]                                              
+2016-11-01   [CF | 49.0%]  [CO | 30.0%]  [ZC | 21.0%]                     [CF | 79.0%]  [CO | 10.0%]  [ZC | 8.0%]   [SU | 3.0%]     
+2016-12-01   [CF | 51.0%]  [CC | 49.0%]                                   [CF | 85.0%]  [CC | 15.0%]                                
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/SSA_MC_classic_vs_risk_done/top5_selections_table_long.csv
+
+Direction: SHORT — Top-5 per method (Classic first 5 columns, Risk-adjusted next 5)
+   Date           C1            C2            C3      C4  C5        R1            R2            R3      R4  R5
+2016-01-01  [CF | 100.0%]                                      [HO | 76.0%]  [CF | 24.0%]                     
+2016-02-01  [ZC | 100.0%]                                     [LE | 100.0%]                                   
+2016-03-01   [NG | 92.0%]  [ZW | 6.0%]   [CF | 2.0%]           [NG | 64.0%]  [HO | 36.0%]                     
+2016-04-01  [CF | 100.0%]                                      [LE | 87.0%]  [CF | 13.0%]                     
+2016-05-01   [SU | 64.0%]  [ZS | 36.0%]                       [NG | 100.0%]                                   
+2016-06-01   [CF | 84.0%]  [SV | 10.0%]  [ZW | 6.0%]           [CF | 55.0%]  [ZW | 45.0%]                     
+2016-07-01   [NG | 83.0%]  [CO | 17.0%]                       [LE | 100.0%]                                   
+2016-08-01  [CO | 100.0%]                                      [CO | 92.0%]  [GD | 7.0%]   [HE | 1.0%]        
+2016-09-01  [ZC | 100.0%]                                      [HO | 70.0%]  [ZC | 30.0%]                     
+2016-10-01   [SU | 96.0%]  [ZC | 3.0%]   [ZW | 1.0%]           [ZC | 72.0%]  [SU | 25.0%]  [ZW | 3.0%]        
+2016-11-01  [HO | 100.0%]                                      [HO | 58.0%]  [LE | 40.0%]  [ZS | 2.0%]        
+2016-12-01  [NG | 100.0%]                                     [LE | 100.0%]                                   
+
+Saved full table to: /Users/ralphkosch/PycharmProjects/Seasonal-Trading-in-Commodity-Markets/Data Analysis/Seasonality Models/Outputs_MC/SSA_MC_classic_vs_risk_done/top5_selections_table_short.csv
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: LONG
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Apply   : 2016-01-01 → 2024-12-31
+  Entry cost=0.0009
+  EWMA λ  : 0.97
+
+Outcome counts (Top-1 over apply)
+  Strategy      Pos(+)  Neg(-)
+  ------------ ------- -------
+  Classic           11      89
+  Risk-adj          46      54
+  Weighted         100       0
+
+CLASSIC — Full Apply Period (across 100 runs)
+Metric    Mean    Median    SD  
+Return  -0.3486  -0.3833  0.2565
+ CAGR   -0.0534  -0.0523  0.0406
+Sharpe   0.004    0.000   0.121 
+ MDD     -0.719   -0.713  0.064 
+
+RISK-ADJUSTED — Full Apply Period (across 100 runs)
+Metric   Mean    Median    SD  
+Return  0.0770  -0.0406  0.4708
+ CAGR   0.0003  -0.0046  0.0441
+Sharpe  0.160    0.151   0.131 
+ MDD    -0.721   -0.724  0.048 
+
+WEIGHTED — Full Apply Period (across 100 runs)
+Metric   Mean   Median    SD  
+Return  0.1441  0.1444  0.0137
+ CAGR   0.0151  0.0151  0.0014
+Sharpe  0.183   0.183   0.011 
+ MDD    -0.415  -0.415  0.003 
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric              Classic     Risk-adj     Weighted
+    -------------- ------------ ------------ ------------
+    Return mean         -0.6614      -0.6752      -0.1374
+    CAGR mean           -0.3071      -0.3148      -0.0481
+    Sharpe mean          -1.426       -1.385       -0.542
+    MDD mean             -0.677       -0.694       -0.215
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric              Classic     Risk-adj     Weighted
+    -------------- ------------ ------------ ------------
+    Return mean          1.0689       0.7173       0.1855
+    CAGR mean            0.2690       0.1926       0.0583
+    Sharpe mean           0.960        0.779        0.452
+    MDD mean             -0.267       -0.258       -0.271
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric              Classic     Risk-adj     Weighted
+    -------------- ------------ ------------ ------------
+    Return mean         -0.0738       0.9177       0.1189
+    CAGR mean           -0.0304       0.2311       0.0381
+    Sharpe mean           0.128        0.675        0.361
+    MDD mean             -0.628       -0.391       -0.201
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, two-sided (α = 0.010)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ CLASSIC LONG  →  RISK LONG ]  (two-sided α=0.010)
+Metric   n     t     p(two-sided)         Conclusion       
+Return  100  10.881    0.0000*     risk long > classic long
+ CAGR   100  12.960    0.0000*     risk long > classic long
+Sharpe  100  12.641    0.0000*     risk long > classic long
+ MDD    100  -0.348     0.7286                ns           
+
+[ CLASSIC LONG  →  WEIGHTED LONG ]  (two-sided α=0.010)
+Metric   n     t     p(two-sided)           Conclusion         
+Return  100  19.398    0.0000*     weighted long > classic long
+ CAGR   100  16.975    0.0000*     weighted long > classic long
+Sharpe  100  15.004    0.0000*     weighted long > classic long
+ MDD    100  47.755    0.0000*     weighted long > classic long
+
+[ RISK LONG  →  WEIGHTED LONG ]  (two-sided α=0.010)
+Metric   n     t     p(two-sided)          Conclusion       
+Return  100  1.433      0.1551                 ns           
+ CAGR   100  3.369     0.0011*     weighted long > risk long
+Sharpe  100  1.757      0.0820                 ns           
+ MDD    100  63.812    0.0000*     weighted long > risk long
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+MONTE CARLO SUMMARY — Direction: SHORT
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Config
+  Lookback: 10y
+  Apply   : 2016-01-01 → 2024-12-31
+  Entry cost=0.0009
+  EWMA λ  : 0.97
+
+Outcome counts (Top-1 over apply)
+  Strategy      Pos(+)  Neg(-)
+  ------------ ------- -------
+  Classic          100       0
+  Risk-adj           9      91
+
+CLASSIC — Full Apply Period (across 100 runs)
+Metric   Mean   Median    SD  
+Return  2.6022  2.4663  1.6406
+ CAGR   0.1415  0.1481  0.0582
+Sharpe  0.503   0.512   0.115 
+ MDD    -0.584  -0.591  0.065 
+
+RISK-ADJUSTED — Full Apply Period (across 100 runs)
+Metric    Mean    Median    SD  
+Return  -0.3087  -0.3483  0.2751
+ CAGR   -0.0474  -0.0465  0.0422
+Sharpe   0.067    0.090   0.125 
+ MDD     -0.825   -0.830  0.043 
+
+Subperiods — Three fixed 3-year windows
+
+  Window 1: 2016-01-01 → 2018-12-31
+    Metric              Classic     Risk-adj
+    -------------- ------------ ------------
+    Return mean          0.2830      -0.2246
+    CAGR mean            0.0838      -0.0856
+    Sharpe mean           0.442       -0.381
+    MDD mean             -0.345       -0.421
+
+  Window 2: 2019-01-01 → 2021-12-31
+    Metric              Classic     Risk-adj
+    -------------- ------------ ------------
+    Return mean          0.3833      -0.2559
+    CAGR mean            0.1085      -0.1050
+    Sharpe mean           0.420        0.028
+    MDD mean             -0.443       -0.734
+
+  Window 3: 2022-01-01 → 2024-12-31
+    Metric              Classic     Risk-adj
+    -------------- ------------ ------------
+    Return mean          1.0117       0.2228
+    CAGR mean            0.2466       0.0650
+    Sharpe mean           0.645        0.345
+    MDD mean             -0.371       -0.403
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Significance — Paired, two-sided (α = 0.010)
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+[ CLASSIC SHORT  →  RISK SHORT ]  (two-sided α=0.010)
+Metric   n      t     p(two-sided)          Conclusion        
+Return  100  -17.312    0.0000*     classic short > risk short
+ CAGR   100  -24.989    0.0000*     classic short > risk short
+Sharpe  100  -23.978    0.0000*     classic short > risk short
+ MDD    100  -30.214    0.0000*     classic short > risk short
+
+[ CLASSIC SHORT  →  WEIGHTED LONG ]  (two-sided α=0.010)
+Metric   n      t     p(two-sided)            Conclusion         
+Return  100  -14.975    0.0000*     classic short > weighted long
+ CAGR   100  -21.681    0.0000*     classic short > weighted long
+Sharpe  100  -27.301    0.0000*     classic short > weighted long
+ MDD    100   25.813    0.0000*     weighted long > classic short
+
+[ RISK SHORT  →  WEIGHTED LONG ]  (two-sided α=0.010)
+Metric   n     t     p(two-sided)          Conclusion        
+Return  100  16.496    0.0000*     weighted long > risk short
+ CAGR   100  14.817    0.0000*     weighted long > risk short
+Sharpe  100  9.314     0.0000*     weighted long > risk short
+ MDD    100  96.080    0.0000*     weighted long > risk short
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Completed
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+Total runtime: 00:08:17
+
