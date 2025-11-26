@@ -32,7 +32,6 @@ LOOKBACK_YEARS = 10  # DVR lookback
 # Portfolio & costs
 START_VALUE = 1000.0
 TRADING_COST = 0.00086  # per side (buy OR sell)
-#TRADING_COST = 0  # set to zero to ignore costs
 
 # DVR params
 SIG_LEVEL = 0.1  # 1.0 => greedy by Z (no p filter)
@@ -42,7 +41,7 @@ EWMA_LAMBDA = 0.97
 
 # IO
 ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
-OUT_DIR_MC = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}_classic_vs_risk_done"
+OUT_DIR_MC = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}_classic_vs_risk"
 
 # Monte Carlo (MEB)
 MC_RUNS = 100

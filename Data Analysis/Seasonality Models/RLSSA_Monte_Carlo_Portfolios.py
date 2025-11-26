@@ -34,7 +34,6 @@ LOOKBACK_YEARS = 10  # Rolling lookback for RLSSA
 # Portfolio & costs
 START_VALUE = 1000.0
 TRADING_COST = 0.00086  # per side (buy OR sell)
-#TRADING_COST = 0        # set to zero to ignore costs
 
 # RLSSA structural parameters
 RLSSA_L = 36  # embedding window length (months)
@@ -50,7 +49,7 @@ EWMA_LAMBDA = 0.97
 
 # IO
 ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
-OUT_DIR_MC = Path().resolve() / "Outputs_MC" / "RLSSA_MC_classic_vs_risk_done"
+OUT_DIR_MC = Path().resolve() / "Outputs_MC" / "RLSSA_MC_classic_vs_risk"
 
 # Monte Carlo (MEB)
 MC_RUNS = 100

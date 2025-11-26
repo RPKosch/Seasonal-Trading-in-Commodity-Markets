@@ -42,7 +42,7 @@ EWMA_LAMBDA = 0.97
 
 # IO
 ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
-OUT_DIR_MC = Path().resolve() / "Outputs_MC" / "SSA_MC_classic_vs_risk_done"
+OUT_DIR_MC = Path().resolve() / "Outputs_MC" / "SSA_MC_classic_vs_risk"
 
 # Monte Carlo (MEB)
 MC_RUNS = 100
