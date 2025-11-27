@@ -213,7 +213,7 @@ def run_correlation_matrix(
     """
     # Paths (match your other scripts)
     project_root = Path().resolve().parent.parent
-    data_root = project_root / "Complete Data" / "All_Monthly_Log_Return_Data"
+    data_root = project_root / "Complete Data" / "All_Monthly_Return_Data"
     out_root = Path().resolve() / "Reports" / "Correlation"
     out_root.mkdir(parents=True, exist_ok=True)
 
