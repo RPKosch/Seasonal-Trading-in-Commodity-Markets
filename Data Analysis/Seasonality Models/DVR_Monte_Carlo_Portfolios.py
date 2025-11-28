@@ -41,7 +41,7 @@ EWMA_LAMBDA = 0.97
 
 # IO
 ROOT_DIR = Path().resolve().parent.parent / "Complete Data"
-OUT_DIR_MC = Path().resolve() / "Outputs_MC" / f"DVR_MC_p≤{SIG_LEVEL}_classic_vs_risk"
+OUT_DIR_MC = Path().resolve() / "Monte_Carlo_Outputs" / f"DVR_MC_p≤{SIG_LEVEL}_classic_vs_risk"
 
 # Monte Carlo (MEB)
 MC_RUNS = 100
