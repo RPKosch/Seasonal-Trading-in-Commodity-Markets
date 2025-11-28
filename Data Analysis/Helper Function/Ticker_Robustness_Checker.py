@@ -156,18 +156,7 @@ def process_model(model_name: str) -> pd.DataFrame | None:
        "Avg_G1_Pct": "Avg_Risk_Adjusted_Pct",
    })
 
-
-   out_path = model_dir / "top1_robustness_overall.csv"
-   #overall[["Side", "Avg_Classic_Pct", "Avg_Risk_Adjusted_Pct", "SameTopRate"]].to_csv(
-   #    out_path, index=False
-   #)
-   print(f"Wrote: {out_path}")
-
-
    return overall
-
-
-
 
 def main():
    BASE_DIR.mkdir(parents=True, exist_ok=True)
